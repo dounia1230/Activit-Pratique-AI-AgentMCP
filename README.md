@@ -13,7 +13,7 @@ ollama pull qwen3.5:4b
 ollama pull nomic-embed-text
 ```
 
-Démarrer Ollama si nécessaire avec `ollama serve`. Les modèles et les adresses se règlent dans `.env`. Le modèle de chat doit accepter les outils et les sorties JSON ; le modèle vision doit accepter les images.
+Démarrer Ollama si nécessaire avec `ollama serve`. Les modèles et les adresses se règlent dans `.env`. Le modèle de chat doit accepter les outils et les sorties JSON. La vision utilise CLIP (`ViT-B-32`, poids `openai`), téléchargé au premier lancement puis exécuté localement sur CPU.
 
 ## Préparer les documents
 
@@ -28,7 +28,7 @@ uv run ingestion.py
 
 Les données de démonstration sont fictives. Le générateur refuse de remplacer des fichiers existants ; s'ils sont déjà présents, lancer seulement l'ingestion.
 
-ChromaDB indexe le texte et les descriptions des figures intégrées aux PDF. Les dessins vectoriels et l'OCR complet des documents scannés ne sont pas pris en charge. Relancer l'ingestion après modification des manuels ou des modèles, sans requête en cours : la collection active est reconstruite.
+ChromaDB conserve deux collections : texte avec les embeddings Ollama, figures avec CLIP. Une photo recherche les figures visuellement proches ; sans photo, CLIP utilise la question. La réponse s'appuie sur le texte des pages retrouvées. CLIP ne lit pas les codes d'erreur et ne produit pas de descriptions. Les dessins vectoriels et l'OCR complet des documents scannés ne sont pas pris en charge. Relancer l'ingestion après modification des manuels ou des modèles, sans requête en cours : les collections actives sont reconstruites.
 
 ## Lancer
 
@@ -67,7 +67,7 @@ uv run ruff check .
 uv run ruff format --check .
 ```
 
-Les tests utilisent des modèles simulés et une base Chroma temporaire. Aucun modèle Ollama n'est nécessaire pour les exécuter.
+Les tests utilisent des modèles simulés et une base Chroma temporaire. Aucun modèle Ollama ni téléchargement CLIP n'est nécessaire pour les exécuter.
 
 ## Références
 

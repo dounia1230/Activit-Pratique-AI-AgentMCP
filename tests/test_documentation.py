@@ -1,5 +1,8 @@
 import asyncio
 
+import numpy as np
+import pytest
+from chromadb.api.types import EmbeddingFunction
 from langchain_core.documents import Document
 from langchain_core.embeddings import DeterministicFakeEmbedding
 from langchain_core.messages import AIMessage, ToolMessage
@@ -10,15 +13,44 @@ import rag
 from examples import creer_demo
 
 
+@pytest.fixture
+def bases(tmp_path, monkeypatch):
+    class ClipSimule(EmbeddingFunction):
+        def __init__(self):
+            self.images_encodees = 0
+
+        def __call__(self, input):
+            self.images_encodees += sum(isinstance(item, np.ndarray) for item in input)
+            return [np.array([1.0, 0.0, 0.0], dtype=np.float32) for item in input]
+
+        @staticmethod
+        def name():
+            return "clip_simule"
+
+        def get_config(self):
+            return {}
+
+        @staticmethod
+        def build_from_config(config):
+            return ClipSimule()
+
+    clip = ClipSimule()
+    monkeypatch.setattr(ingestion, "DATA", tmp_path)
+    monkeypatch.setattr(
+        ingestion, "embeddings", lambda: DeterministicFakeEmbedding(size=16)
+    )
+    monkeypatch.setattr(ingestion, "embeddings_clip", lambda: clip)
+    texte = ingestion.base_documentaire()
+    images = ingestion.base_figures()
+    monkeypatch.setattr(rag, "base_documentaire", lambda: texte)
+    monkeypatch.setattr(rag, "base_figures", lambda: images)
+    return texte, images, clip
+
+
 def test_extraction_texte_et_figure(tmp_path, monkeypatch):
     monkeypatch.setattr(creer_demo, "DATA", tmp_path)
     creer_demo.main()
     monkeypatch.setattr(ingestion, "DATA", tmp_path)
-    monkeypatch.setattr(
-        ingestion,
-        "decrire_image",
-        lambda *args: "Voyant rouge, point d'exclamation, E02",
-    )
     documents = ingestion.extraire_pdf(tmp_path / "manuels" / "manuel_demo_px200.pdf")
     assert {d.metadata["type"] for d in documents} == {"texte", "figure"}
     assert all(d.metadata["page"] == 1 for d in documents)
@@ -29,31 +61,30 @@ def test_extraction_texte_et_figure(tmp_path, monkeypatch):
     assert (tmp_path / figure.metadata["image"]).is_file()
 
 
-def test_rag_recherche_texte_et_figure_et_sources(tmp_path, monkeypatch):
+def test_rag_recherche_texte_et_figure_et_sources(bases, monkeypatch):
     # Vraie base Chroma ; embeddings et génération simulés, aucun appel réseau.
-    monkeypatch.setattr(ingestion, "DATA", tmp_path)
-    monkeypatch.setattr(
-        ingestion, "embeddings", lambda: DeterministicFakeEmbedding(size=16)
-    )
-    base = ingestion.base_documentaire()
+    base, images, _ = bases
     base.add_documents(
         [
             Document(
                 page_content="E02 : ajouter du papier.",
                 metadata={"source": "manuel.pdf", "page": 4, "type": "texte"},
             ),
-            Document(
-                page_content="Voyant papier rouge.",
-                metadata={
-                    "source": "manuel.pdf",
-                    "page": 4,
-                    "type": "figure",
-                    "image": "figures/voyant.png",
-                },
-            ),
         ]
     )
-    monkeypatch.setattr(rag, "base_documentaire", lambda: base)
+    images.add(
+        ids=["figure"],
+        embeddings=[[1.0, 0.0, 0.0]],
+        documents=["Voyant papier rouge."],
+        metadatas=[
+            {
+                "source": "manuel.pdf",
+                "page": 4,
+                "type": "figure",
+                "image": "figures/voyant.png",
+            }
+        ],
+    )
     monkeypatch.setattr(rag, "modele", lambda: None)
 
     def agent_simule(model, tools, system_prompt):
@@ -78,15 +109,31 @@ def test_rag_recherche_texte_et_figure_et_sources(tmp_path, monkeypatch):
     assert "page 4" in resultat["reponse"]
 
 
-def test_base_vide_ne_genere_pas_de_reponse(tmp_path, monkeypatch):
-    monkeypatch.setattr(ingestion, "DATA", tmp_path)
-    monkeypatch.setattr(
-        ingestion, "embeddings", lambda: DeterministicFakeEmbedding(size=16)
-    )
-    monkeypatch.setattr(rag, "base_documentaire", ingestion.base_documentaire)
+def test_base_vide_ne_genere_pas_de_reponse(bases):
     resultat = asyncio.run(rag.repondre_documentation("Question sans source"))
     assert resultat["sources"] == []
     assert "vide" in resultat["reponse"]
+
+
+def test_ingestion_et_recherche_par_photo_utilisent_les_pixels(
+    bases, tmp_path, monkeypatch
+):
+    textes, images, clip = bases
+    monkeypatch.setattr(creer_demo, "DATA", tmp_path)
+    creer_demo.main()
+    ingestion.main()
+    assert textes.get()["ids"]
+    assert images.count() == 1
+    assert (
+        clip.images_encodees == 1
+    )  # La légende ne doit pas remplacer l'image à indexer.
+    resultat = images.query(
+        query_uris=[str(tmp_path / "photos" / "img_px200_01.png")],
+        n_results=1,
+        include=["metadatas"],
+    )
+    assert clip.images_encodees == 2
+    assert resultat["metadatas"][0][0]["source"] == "manuel_demo_px200.pdf"
 
 
 def test_mcp_conserve_les_references_sans_llm(monkeypatch):

@@ -1,11 +1,11 @@
-"""Configuration commune : tous les modèles tournent dans Ollama."""
+"""Configuration des modèles locaux et des chemins de données."""
 
-import base64
 import os
+from functools import cache
 from pathlib import Path
 
+from chromadb.utils.embedding_functions import OpenCLIPEmbeddingFunction
 from dotenv import load_dotenv
-from langchain_core.messages import HumanMessage
 from langchain_ollama import ChatOllama, OllamaEmbeddings
 
 ROOT = Path(__file__).resolve().parent
@@ -13,14 +13,15 @@ load_dotenv(ROOT / ".env")
 DATA = ROOT / "data"
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 CHAT_MODEL = os.getenv("CHAT_MODEL", "qwen3.5:4b")
-VISION_MODEL = os.getenv("VISION_MODEL", "qwen3.5:4b")
+CLIP_MODEL = os.getenv("CLIP_MODEL", "ViT-B-32")
+CLIP_CHECKPOINT = os.getenv("CLIP_CHECKPOINT", "openai")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "nomic-embed-text")
 MCP_URL = os.getenv("MCP_URL", "http://127.0.0.1:24000/mcp")
 
 
-def modele(vision=False):
+def modele():
     return ChatOllama(
-        model=VISION_MODEL if vision else CHAT_MODEL,
+        model=CHAT_MODEL,
         base_url=OLLAMA_URL,
         temperature=0,
         reasoning=False,
@@ -34,22 +35,14 @@ def embeddings():
     return OllamaEmbeddings(model=EMBEDDING_MODEL, base_url=OLLAMA_URL)
 
 
-def decrire_image(image: Path, consigne: str) -> str:
-    """Le modèle vision reçoit réellement les pixels de l'image."""
-    mime = "image/jpeg" if image.suffix.lower() in {".jpg", ".jpeg"} else "image/png"
-    if image.suffix.lower() == ".webp":
-        mime = "image/webp"
-    contenu = base64.b64encode(image.read_bytes()).decode()
-    message = HumanMessage(
-        content=[
-            {"type": "text", "text": consigne},
-            {
-                "type": "image_url",
-                "image_url": {"url": f"data:{mime};base64,{contenu}"},
-            },
-        ]
+@cache
+def embeddings_clip():
+    """Charger CLIP une seule fois ; les calculs restent locaux sur CPU."""
+    return OpenCLIPEmbeddingFunction(
+        model_name=CLIP_MODEL,
+        checkpoint=CLIP_CHECKPOINT,
+        device="cpu",
     )
-    return modele(vision=True).invoke([message]).text
 
 
 def trouver_photo(reference: str) -> Path:
