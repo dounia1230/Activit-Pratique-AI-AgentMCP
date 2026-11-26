@@ -19,14 +19,16 @@ Démarrer Ollama si nécessaire avec `ollama serve`. Les modèles et les adresse
 
 Placer les manuels PDF dans `data/manuels/` et les photos dans `data/photos/`.
 
-Pour créer un manuel PX-200 et une photo de test :
+Un vrai document pour commencer : le [guide officiel Epson ET-2850 en français](https://files.support.epson.com/docid/cpd6/cpd60207.pdf), avec 279 pages et des images intégrées. Il couvre notamment le chargement du papier, le Wi-Fi, l'entretien et la résolution des pannes.
+
+Le fichier téléchargé est `data/manuels/epson_et2850_guide_fr.pdf`. Pour le récupérer sur une nouvelle installation, puis l'indexer :
 
 ```powershell
-uv run examples/creer_demo.py
+Invoke-WebRequest -Uri "https://files.support.epson.com/docid/cpd6/cpd60207.pdf" -OutFile "data/manuels/epson_et2850_guide_fr.pdf"
 uv run ingestion.py
 ```
 
-Les données de démonstration sont fictives. Le générateur refuse de remplacer des fichiers existants ; s'ils sont déjà présents, lancer seulement l'ingestion.
+Si le PDF est déjà présent, lancer seulement l'ingestion, ou utiliser **Indexer les PDF** dans Streamlit. Le PDF reste local, hors de Git. Les références de page correspondent aux pages du PDF complet. Le registre de garantie fourni reste un jeu de données pédagogique fictif, indépendant de ce manuel Epson.
 
 ChromaDB conserve deux collections : texte avec les embeddings Ollama, figures avec CLIP. Une photo recherche les figures visuellement proches ; sans photo, CLIP utilise la question. La réponse s'appuie sur le texte des pages retrouvées. CLIP ne lit pas les codes d'erreur et ne produit pas de descriptions. Les dessins vectoriels et l'OCR complet des documents scannés ne sont pas pris en charge. Relancer l'ingestion après modification des manuels ou des modèles, sans requête en cours : les collections actives sont reconstruites.
 
@@ -48,10 +50,12 @@ Ou poser directement une question :
 
 ```powershell
 uv run main.py "Mon imprimante PX200-0042 est-elle sous garantie ?"
-uv run main.py "Que signifie le code E02 sur mon imprimante PX-200 ?" --photo img_px200_01
+uv run main.py "Comment retirer un bourrage papier sur mon Epson ET-2850 ?"
 ```
 
 `--photo` désigne le nom d'un fichier PNG, JPEG ou WebP de `data/photos/`, avec ou sans extension. Chaque question est indépendante. Le parcours garantie fonctionne sans serveur MCP ; son registre est `data/garanties.json`.
+
+Questions possibles avec le manuel Epson indexé : « Comment charger le papier dans mon Epson ET-2850 ? », « Comment configurer le Wi-Fi ? » ou « Comment nettoyer la tête d'impression ? ». Les figures retrouvées apparaissent sous la réponse dans Streamlit lorsqu'elles sont disponibles.
 
 Pour tester la garantie sans LLM :
 
