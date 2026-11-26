@@ -73,6 +73,33 @@ def test_figures_citees_et_pixels_conserves_sans_chemin_externe(tmp_path, monkey
     assert fichiers.figures_reponse("Aucune source") == []
 
 
+def test_apercu_des_pages_citees_conserve_les_dessins_vectoriels(tmp_path, monkeypatch):
+    monkeypatch.setattr(fichiers, "DATA", tmp_path)
+    dossier = tmp_path / "manuels"
+    dossier.mkdir()
+    with pymupdf.open() as pdf:
+        page = pdf.new_page(width=200, height=200)
+        page.draw_rect(pymupdf.Rect(40, 40, 160, 160), color=(1, 0, 0), fill=(1, 0, 0))
+        pdf.new_page(width=200, height=200)
+        pdf.save(dossier / "manuel.pdf")
+    reponse = (
+        "Procédure.\n\nSources consultées :\n"
+        "- manuel.pdf, page 1\n- manuel.pdf, page 1\n- manuel.pdf, page 2"
+    )
+    apercus = fichiers.figures_reponse(reponse)
+    assert len(apercus) == 2
+    assert apercus[0]["legende"] == "manuel.pdf, page 1 — aperçu du manuel"
+    with Image.open(BytesIO(apercus[0]["contenu"])) as image:
+        assert image.getpixel((image.width // 2, image.height // 2)) == (255, 0, 0)
+    (tmp_path / "prive.pdf").write_bytes((dossier / "manuel.pdf").read_bytes())
+    assert (
+        fichiers.figures_reponse(
+            "\n\nSources consultées :\n- ../prive.pdf, page 1\n- manuel.pdf, page 0\n- manuel.pdf, page 999"
+        )
+        == []
+    )
+
+
 @pytest.mark.parametrize("erreur", [False, True])
 def test_indexation_utilise_mcp_et_remonte_ses_erreurs(monkeypatch, erreur):
     class Session:

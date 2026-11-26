@@ -131,4 +131,34 @@ def figures_reponse(reponse):
         )
         if len(figures) == 2:
             break
+    if figures:
+        return figures
+
+    # Les dessins vectoriels ne sont pas des images intégrées : montrer la page.
+    dossier_manuels = (DATA / "manuels").resolve()
+    for source, page in re.findall(
+        r"^- (.+), page (\d+)$", references, flags=re.MULTILINE
+    ):
+        chemin = (dossier_manuels / source).resolve()
+        cle = (chemin, int(page))
+        if (
+            not chemin.is_relative_to(dossier_manuels)
+            or chemin.suffix.lower() != ".pdf"
+            or cle in deja_vues
+        ):
+            continue
+        try:
+            with pymupdf.open(chemin) as pdf:
+                if not 1 <= int(page) <= len(pdf):
+                    continue
+                pixels = pdf[int(page) - 1].get_pixmap(dpi=100, alpha=False)
+                contenu = pixels.tobytes("png")
+        except (OSError, RuntimeError, ValueError):
+            continue  # Une source indisponible n'empêche pas de lire la réponse.
+        deja_vues.add(cle)
+        figures.append(
+            {"contenu": contenu, "legende": f"{source}, page {page} — aperçu du manuel"}
+        )
+        if len(figures) == 2:
+            break
     return figures

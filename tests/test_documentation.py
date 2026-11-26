@@ -13,6 +13,7 @@ from PIL import Image
 import ingestion
 import mcp_server
 import rag
+from recherche import figures_des_pages, rechercher_passages
 
 
 @pytest.fixture
@@ -130,6 +131,112 @@ def test_base_vide_ne_genere_pas_de_reponse(bases):
     resultat = asyncio.run(rag.repondre_documentation("Question sans source"))
     assert resultat["sources"] == []
     assert "vide" in resultat["reponse"]
+
+
+def test_recherche_retient_la_procedure_et_ses_pages_de_suite(bases, monkeypatch):
+    base, _, _ = bases
+    source = "epson_et2850_guide_fr.pdf"
+    donnees = [
+        (
+            8,
+            "Bourrages papier........................224\nBourrages papier arrière................227",
+        ),
+        (59, "Types de papier Epson compatibles et capacité du bac."),
+        (224, "Problèmes de bourrage papier. Retirez le papier coincé."),
+        (225, "Ouvrez le scanner à deux mains puis dégagez la feuille."),
+        (226, "Ne touchez pas au câble plat blanc. Abaissez le scanner."),
+        (227, "Bourrages papier dans le capot arrière."),
+    ]
+    documents = [
+        Document(
+            page_content=texte,
+            metadata={"source": source, "page": page, "type": "texte"},
+        )
+        for page, texte in donnees
+    ]
+    documents.append(
+        Document(
+            page_content="Bourrage papier : retirer le capot de cet autre modèle.",
+            metadata={"source": "epson_et4750.pdf", "page": 1, "type": "texte"},
+        )
+    )
+    base.add_documents(documents)
+    # Reproduire un classement vectoriel qui ne retourne que les mauvaises pages.
+    monkeypatch.setattr(
+        base, "similarity_search", lambda *args, **kwargs: documents[:1]
+    )
+    resultat = rechercher_passages(
+        base,
+        "Comment retirer un bourrage papier sur mon Epson ET-2850 ?",
+        "Papier Epson ET-4750",  # Le LLM ne peut pas changer le modèle de la question.
+    )
+    assert {224, 225, 226}.issubset({doc.metadata["page"] for doc in resultat})
+    assert 8 not in {doc.metadata["page"] for doc in resultat}
+    assert len(resultat) <= 6
+    assert all(doc.metadata["source"] == source for doc in resultat)
+    assert any("câble plat blanc" in doc.page_content for doc in resultat)
+
+
+def test_recherche_sans_mot_exact_conserve_la_recherche_semantique(bases, monkeypatch):
+    base, _, _ = bases
+    document = Document(
+        page_content="Connexion sans fil avec le routeur.",
+        metadata={"source": "manuel.pdf", "page": 12, "type": "texte"},
+    )
+    base.add_documents([document])
+    monkeypatch.setattr(base, "similarity_search", lambda *args, **kwargs: [document])
+    resultat = rechercher_passages(base, "Associer ordinateur réseau")
+    assert resultat[0].metadata["page"] == 12
+    assert resultat[0].page_content == document.page_content
+
+
+def test_recherche_sur_base_vide(bases):
+    base, _, _ = bases
+    assert rechercher_passages(base, "Question sans document") == []
+
+
+def test_page_commencant_par_etape_quatre_conserve_la_page_precedente(bases):
+    base, _, _ = bases
+    base.add_documents(
+        [
+            Document(
+                page_content="14\n1. Ouvrez le capot.",
+                metadata={"source": "manuel.pdf", "page": 14, "type": "texte"},
+            ),
+            Document(
+                page_content="15\n4. Retirez le papier coincé.",
+                metadata={"source": "manuel.pdf", "page": 15, "type": "texte"},
+            ),
+        ]
+    )
+    resultat = rechercher_passages(base, "Retirer le papier coincé")
+    assert [doc.metadata["page"] for doc in resultat[:2]] == [14, 15]
+
+
+def test_illustrations_appartiennent_aux_pages_retrouvees(bases):
+    _, images, _ = bases
+    images.add(
+        ids=["windows", "retrait", "scanner"],
+        embeddings=[[1.0, 0.0, 0.0]] * 3,
+        documents=["Paramètres Windows", "Retirer le papier", "Ouvrir le scanner"],
+        metadatas=[
+            {
+                "source": "manuel.pdf",
+                "page": page,
+                "type": "figure",
+                "image": f"figures/{page}.png",
+            }
+            for page in [93, 224, 225]
+        ],
+    )
+    documents = [
+        Document(
+            page_content="Procédure", metadata={"source": "manuel.pdf", "page": page}
+        )
+        for page in [224, 225, 226]
+    ]
+    resultat = figures_des_pages(images, documents)
+    assert [doc.metadata["page"] for doc in resultat] == [224, 225]
 
 
 def test_ingestion_et_recherche_par_photo_utilisent_les_pixels(bases, documents_test):
