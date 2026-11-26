@@ -65,7 +65,7 @@ Le texte utilise les préfixes `search_document:` et `search_query:` lorsque le 
 
 Chaque ingestion reçoit une version. La nouvelle version n'est publiée qu'après le succès du texte, des tableaux, des descriptions et des vecteurs CLIP. PostgreSQL change le pointeur de version active dans une transaction unique. En cas d'échec, l'ancienne version reste consultable ; les descriptions terminées restent en cache. Les anciennes lignes sont retirées après publication. Un arrêt brutal peut laisser des lignes non actives ; elles ne sont pas utilisées pour répondre.
 
-Les anciens fichiers ChromaDB ne sont plus utilisés et ne sont pas supprimés automatiquement. **Une nouvelle indexation est nécessaire après cette migration vers PGVector.** Changer les modèles ou leur dimension nécessite également une nouvelle ingestion.
+PGVector est l'unique stockage vectoriel du projet. Les embeddings textuels sont produits par `nomic-embed-text` et les embeddings visuels par CLIP. Changer les modèles ou leur dimension nécessite une nouvelle ingestion.
 
 ## Recherche et réponses
 
