@@ -9,6 +9,8 @@ from functools import lru_cache
 import snowballstemmer
 from langchain_core.documents import Document
 
+from config import embeddings
+
 MOTS_VIDES = set(
     "a au aux avec ce ces comment dans de des du elle en est et fait il ils je la le "
     "les leur lui ma mais me mes mon ne nous on ou par pas pour que quel quelle "
@@ -36,9 +38,10 @@ def mots(texte):
 
 
 def rechercher_passages(base, question, reformulation=""):
-    contenu = base.get(where={"type": "texte"}, include=["documents", "metadatas"])
+    contenu = base.documents()
     pages_indexees = {}
-    for texte, metadata in zip(contenu["documents"], contenu["metadatas"]):
+    for document in contenu:
+        texte, metadata = document.page_content, document.metadata
         cle = (metadata["source"], metadata["page"])
         if cle not in pages_indexees:
             pages_indexees[cle] = Document(page_content=texte, metadata=metadata)
@@ -69,10 +72,9 @@ def rechercher_passages(base, question, reformulation=""):
         documents = [doc for doc in documents if doc.metadata["source"] in sources]
         # Le modèle sert à choisir le manuel, pas à privilégier sa page de couverture.
         requete.difference_update(mots(" ".join(sources)))
-    filtre = {"type": "texte"}
-    if sources:
-        filtre = {"$and": [filtre, {"source": {"$in": sorted(sources)}}]}
-    semantiques = base.similarity_search(question, k=6, filter=filtre)
+    semantiques = base.proches(
+        embeddings().get_query_embedding(question), sources=sources
+    )
 
     # BM25 : les mots rares, comme un code d'erreur, pèsent plus que « papier ».
     termes = [Counter(mots(doc.page_content)) for doc in documents]
@@ -135,23 +137,11 @@ def rechercher_passages(base, question, reformulation=""):
 def figures_des_pages(figures, documents):
     resultat = []
     for doc in documents:
-        contenu = figures.get(
-            where={
-                "$and": [
-                    {"source": doc.metadata["source"]},
-                    {"page": doc.metadata["page"]},
-                ]
-            },
-            include=["documents", "metadatas"],
-            limit=1,
+        contenu = figures.documents(
+            criteres={"source": doc.metadata["source"], "page": doc.metadata["page"]}
         )
-        if contenu["ids"]:
-            resultat.append(
-                Document(
-                    page_content=contenu["documents"][0],
-                    metadata=contenu["metadatas"][0],
-                )
-            )
+        if contenu:
+            resultat.append(contenu[0])
         if len(resultat) == 2:
             break
     return resultat

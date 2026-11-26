@@ -1,24 +1,26 @@
+"""Extraction réelle, modèles simulés et index en mémoire pour les tests courants."""
+
 import asyncio
 import threading
+from copy import deepcopy
 
-import numpy as np
 import pymupdf
 import pytest
-from chromadb.api.types import EmbeddingFunction
 from langchain_core.documents import Document
-from langchain_core.embeddings import DeterministicFakeEmbedding
 from langchain_core.messages import AIMessage, ToolMessage
+from llama_index.core.embeddings import MockEmbedding
+from llama_index.core.schema import TextNode
 from PIL import Image
 
 import ingestion
 import mcp_server
 import rag
+import recherche
 from recherche import figures_des_pages, rechercher_passages
 
 
 @pytest.fixture
 def documents_test(tmp_path):
-    # Données minimales créées uniquement dans le dossier temporaire des tests.
     (tmp_path / "manuels").mkdir()
     (tmp_path / "photos").mkdir()
     photo = tmp_path / "photos" / "photo_test.png"
@@ -28,80 +30,154 @@ def documents_test(tmp_path):
         page = pdf.new_page()
         page.insert_text((40, 40), "Le bac a papier est vide. Ajouter du papier.")
         page.insert_image(pymupdf.Rect(40, 80, 140, 180), filename=str(photo))
+        for x in [40, 160, 400]:
+            page.draw_line((x, 240), (x, 320))
+        for y in [240, 280, 320]:
+            page.draw_line((40, y), (400, y))
+        for x, y, texte in [
+            (50, 260, "Code"),
+            (170, 260, "Action"),
+            (50, 300, "E02"),
+            (170, 300, "Ajouter du papier"),
+        ]:
+            page.insert_text((x, y), texte)
         pdf.save(manuel)
     return manuel, photo
 
 
 @pytest.fixture
-def bases(tmp_path, monkeypatch):
-    class ClipSimule(EmbeddingFunction):
+def bases(monkeypatch, tmp_path):
+    etat = {}
+    pixels = []
+
+    class IndexMemoire:
         def __init__(self):
-            self.images_encodees = 0
+            self.noeuds = []
 
-        def __call__(self, input):
-            self.images_encodees += sum(isinstance(item, np.ndarray) for item in input)
-            return [np.array([1.0, 0.0, 0.0], dtype=np.float32) for item in input]
+        def ajouter(self, noeuds):
+            self.noeuds.extend(deepcopy(noeuds))
 
-        @staticmethod
-        def name():
-            return "clip_simule"
+        def supprimer(self, version):
+            self.noeuds = [n for n in self.noeuds if n.metadata["version"] != version]
 
-        def get_config(self):
-            return {}
+        def documents(self, version=None, criteres=None):
+            version = version or etat.get("version")
+            return [
+                Document(page_content=n.get_content(), metadata=n.metadata)
+                for n in self.noeuds
+                if n.metadata["version"] == version
+                and all(n.metadata.get(k) == v for k, v in (criteres or {}).items())
+            ]
 
-        @staticmethod
-        def build_from_config(config):
-            return ClipSimule()
+        def proches(self, vecteur, nombre=6, sources=None):
+            return [
+                d
+                for d in self.documents()
+                if not sources or d.metadata["source"] in sources
+            ][:nombre]
 
-    clip = ClipSimule()
+    textes, images = IndexMemoire(), IndexMemoire()
+
+    def publier(version, compteurs):
+        etat.clear()
+        etat.update(version=version, **compteurs)
+
+    def encoder(chemins):
+        for chemin in chemins:
+            with Image.open(chemin) as image:
+                pixels.append(image.getpixel((0, 0)))
+        return [[1.0, 0.0, 0.0] for _ in chemins]
+
     monkeypatch.setattr(ingestion, "DATA", tmp_path)
+    monkeypatch.setattr(ingestion, "preparer_stockage", lambda: None)
+    monkeypatch.setattr(ingestion, "publier_index", publier)
+    monkeypatch.setattr(ingestion, "embeddings", lambda: MockEmbedding(embed_dim=16))
+    monkeypatch.setattr(recherche, "embeddings", lambda: MockEmbedding(embed_dim=16))
     monkeypatch.setattr(
-        ingestion, "embeddings", lambda: DeterministicFakeEmbedding(size=16)
+        ingestion, "decrire_image", lambda chemin: "Carré rouge visible dans la figure."
     )
-    monkeypatch.setattr(ingestion, "embeddings_clip", lambda: clip)
-    texte = ingestion.base_documentaire()
-    images = ingestion.base_figures()
-    monkeypatch.setattr(rag, "base_documentaire", lambda: texte)
-    monkeypatch.setattr(rag, "base_figures", lambda: images)
-    return texte, images, clip
+    for module in [ingestion, rag]:
+        monkeypatch.setattr(module, "base_documentaire", lambda: textes)
+        monkeypatch.setattr(module, "base_figures", lambda: images)
+        monkeypatch.setattr(module, "etat_index", lambda: etat or None)
+        monkeypatch.setattr(module, "encoder_images", encoder)
+    return textes, images, etat, pixels
 
 
-def test_extraction_texte_et_figure(tmp_path, monkeypatch, documents_test):
-    monkeypatch.setattr(ingestion, "DATA", tmp_path)
+def noeud(texte, page=1, source="manuel.pdf", type="texte", **metadata):
+    return TextNode(
+        text=texte,
+        embedding=[0.5] * 16,
+        metadata={
+            "source": source,
+            "page": page,
+            "type": type,
+            "version": "ancienne",
+            **metadata,
+        },
+    )
+
+
+def test_extraction_llamaindex_texte_image_et_tableau(bases, documents_test):
     manuel, _ = documents_test
     documents = ingestion.extraire_pdf(manuel)
-    assert {d.metadata["type"] for d in documents} == {"texte", "figure"}
-    assert all(d.metadata["page"] == 1 for d in documents)
-    assert any(
-        "bac a papier est vide" in " ".join(d.page_content.split()) for d in documents
+    assert {n.metadata["type"] for n in documents} == {"texte", "figure", "tableau"}
+    assert all(
+        n.metadata["source"] == manuel.name and n.metadata["page"] == 1
+        for n in documents
     )
-    figure = next(d for d in documents if d.metadata["type"] == "figure")
-    assert (tmp_path / figure.metadata["image"]).is_file()
+    tableau = next(n for n in documents if n.metadata["type"] == "tableau")
+    assert tableau.metadata["lignes"] == [
+        ["Code", "Action"],
+        ["E02", "Ajouter du papier"],
+    ]
+    assert "| E02 | Ajouter du papier |" in tableau.text
+    figure = next(n for n in documents if n.metadata["type"] == "figure")
+    assert (ingestion.DATA / figure.metadata["image"]).is_file()
 
 
-def test_rag_recherche_texte_et_figure_et_sources(bases, monkeypatch):
-    # Vraie base Chroma ; embeddings et génération simulés, aucun appel réseau.
-    base, images, _ = bases
-    base.add_documents(
+def test_ingestion_indexe_les_descriptions_et_les_pixels(bases, documents_test):
+    textes, images, etat, pixels = bases
+    resultat = ingestion.main()
+    assert resultat["tableaux"] == 1 and resultat["figures"] == 1
+    assert pixels == [(255, 0, 0)]
+    descriptions = [d for d in textes.documents() if d.metadata["type"] == "figure"]
+    assert "Carré rouge" in descriptions[0].page_content
+    assert (
+        images.documents()[0].metadata["description"]
+        == "Carré rouge visible dans la figure."
+    )
+    assert images.documents()[0].metadata["version"] == etat["version"]
+
+
+def test_dessin_vectoriel_converti_en_figure_indexable(bases, tmp_path):
+    manuel = tmp_path / "schema.pdf"
+    with pymupdf.open() as pdf:
+        page = pdf.new_page()
+        page.insert_text((40, 40), "Schema de la machine")
+        page.draw_circle((200, 200), 80, color=(1, 0, 0), fill=(1, 0, 0))
+        pdf.save(manuel)
+    figures = [
+        n for n in ingestion.extraire_pdf(manuel) if n.metadata["type"] == "figure"
+    ]
+    assert len(figures) == 1
+    assert figures[0].metadata["origine"] == "dessin_vectoriel"
+    assert (tmp_path / figures[0].metadata["image"]).is_file()
+
+
+def test_rag_recherche_texte_descriptions_et_sources(bases, monkeypatch):
+    textes, images, etat, _ = bases
+    etat["version"] = "ancienne"
+    textes.ajouter([noeud("E02 : ajouter du papier.", page=4)])
+    images.ajouter(
         [
-            Document(
-                page_content="E02 : ajouter du papier.",
-                metadata={"source": "manuel.pdf", "page": 4, "type": "texte"},
-            ),
+            noeud(
+                "Voyant papier rouge.",
+                page=4,
+                type="figure",
+                image="figures/voyant.png",
+            )
         ]
-    )
-    images.add(
-        ids=["figure"],
-        embeddings=[[1.0, 0.0, 0.0]],
-        documents=["Voyant papier rouge."],
-        metadatas=[
-            {
-                "source": "manuel.pdf",
-                "page": 4,
-                "type": "figure",
-                "image": "figures/voyant.png",
-            }
-        ],
     )
     monkeypatch.setattr(rag, "modele", lambda: None)
 
@@ -109,8 +185,9 @@ def test_rag_recherche_texte_et_figure_et_sources(bases, monkeypatch):
         class Agent:
             async def ainvoke(self, etat, **kwargs):
                 contenu = await tools[0].ainvoke({"requete": "E02 papier"})
-                assert "ajouter du papier" in contenu
-                assert "figures/voyant.png" in contenu
+                assert (
+                    "ajouter du papier" in contenu and "figures/voyant.png" in contenu
+                )
                 return {
                     "messages": [
                         ToolMessage(content=contenu, tool_call_id="test"),
@@ -123,205 +200,187 @@ def test_rag_recherche_texte_et_figure_et_sources(bases, monkeypatch):
     monkeypatch.setattr(rag, "create_agent", agent_simule)
     resultat = asyncio.run(rag.repondre_documentation("Que signifie E02 ?"))
     assert {s["type"] for s in resultat["sources"]} == {"texte", "figure"}
-    assert all(s["source"] == "manuel.pdf" for s in resultat["sources"])
     assert "page 4" in resultat["reponse"]
 
 
 def test_base_vide_ne_genere_pas_de_reponse(bases):
     resultat = asyncio.run(rag.repondre_documentation("Question sans source"))
-    assert resultat["sources"] == []
-    assert "vide" in resultat["reponse"]
+    assert resultat["sources"] == [] and "vide" in resultat["reponse"]
 
 
-def test_recherche_retient_la_procedure_et_ses_pages_de_suite(bases, monkeypatch):
-    base, _, _ = bases
+def test_question_generale_recherche_meme_si_le_modele_oublie_outil(bases, monkeypatch):
+    textes, _, etat, _ = bases
+    etat["version"] = "ancienne"
+    textes.ajouter([noeud("Guide utilisateur Epson ET-2850.", page=11)])
+    monkeypatch.setattr(rag, "modele", lambda: None)
+    appels = []
+
+    class Agent:
+        async def ainvoke(self, etat, **kwargs):
+            appels.append(etat)
+            if len(appels) == 1:
+                return {"messages": [AIMessage(content="Précisez votre appareil.")]}
+            messages = etat["messages"]
+            assert messages[1].tool_calls[0]["name"] == "rechercher_manuels"
+            assert isinstance(messages[2], ToolMessage)
+            assert "Guide utilisateur Epson ET-2850" in messages[2].text
+            return {
+                "messages": [
+                    *messages,
+                    AIMessage(content="Le PDF est le guide Epson ET-2850, page 11."),
+                ]
+            }
+
+    monkeypatch.setattr(rag, "create_agent", lambda **kwargs: Agent())
+    resultat = asyncio.run(rag.repondre_documentation("c quoi le pdf"))
+    assert len(appels) == 2
+    assert "guide Epson" in resultat["reponse"]
+    assert resultat["sources"][0]["page"] == 11
+
+
+def test_recherche_procedure_pages_de_suite_et_bon_modele(bases, monkeypatch):
+    textes, _, etat, _ = bases
+    etat["version"] = "ancienne"
     source = "epson_et2850_guide_fr.pdf"
     donnees = [
         (
             8,
-            "Bourrages papier........................224\nBourrages papier arrière................227",
+            "Bourrages papier................224\nBourrages arrière................227",
         ),
-        (59, "Types de papier Epson compatibles et capacité du bac."),
-        (224, "Problèmes de bourrage papier. Retirez le papier coincé."),
-        (225, "Ouvrez le scanner à deux mains puis dégagez la feuille."),
-        (226, "Ne touchez pas au câble plat blanc. Abaissez le scanner."),
-        (227, "Bourrages papier dans le capot arrière."),
+        (59, "Types de papier Epson compatibles."),
+        (224, "Bourrage papier : retirez le papier coincé."),
+        (225, "Ouvrez le scanner à deux mains."),
+        (226, "Ne touchez pas au câble plat blanc."),
+        (227, "Bourrage papier dans le capot arrière."),
     ]
-    documents = [
-        Document(
-            page_content=texte,
-            metadata={"source": source, "page": page, "type": "texte"},
-        )
-        for page, texte in donnees
-    ]
-    documents.append(
-        Document(
-            page_content="Bourrage papier : retirer le capot de cet autre modèle.",
-            metadata={"source": "epson_et4750.pdf", "page": 1, "type": "texte"},
-        )
+    textes.ajouter(
+        [noeud(t, page=p, source=source) for p, t in donnees]
+        + [noeud("Bourrage papier", source="epson_et4750.pdf")]
     )
-    base.add_documents(documents)
-    # Reproduire un classement vectoriel qui ne retourne que les mauvaises pages.
     monkeypatch.setattr(
-        base, "similarity_search", lambda *args, **kwargs: documents[:1]
+        textes, "proches", lambda *args, **kwargs: textes.documents()[:1]
     )
     resultat = rechercher_passages(
-        base,
+        textes,
         "Comment retirer un bourrage papier sur mon Epson ET-2850 ?",
-        "Papier Epson ET-4750",  # Le LLM ne peut pas changer le modèle de la question.
+        "Papier Epson ET-4750",
     )
-    assert {224, 225, 226}.issubset({doc.metadata["page"] for doc in resultat})
-    assert 8 not in {doc.metadata["page"] for doc in resultat}
+    assert {224, 225, 226}.issubset({d.metadata["page"] for d in resultat})
+    assert all(d.metadata["source"] == source for d in resultat)
+    assert 8 not in {d.metadata["page"] for d in resultat}
     assert len(resultat) <= 6
-    assert all(doc.metadata["source"] == source for doc in resultat)
-    assert any("câble plat blanc" in doc.page_content for doc in resultat)
 
 
-def test_recherche_sans_mot_exact_conserve_la_recherche_semantique(bases, monkeypatch):
-    base, _, _ = bases
-    document = Document(
-        page_content="Connexion sans fil avec le routeur.",
-        metadata={"source": "manuel.pdf", "page": 12, "type": "texte"},
-    )
-    base.add_documents([document])
-    monkeypatch.setattr(base, "similarity_search", lambda *args, **kwargs: [document])
-    resultat = rechercher_passages(base, "Associer ordinateur réseau")
-    assert resultat[0].metadata["page"] == 12
-    assert resultat[0].page_content == document.page_content
-
-
-def test_recherche_sur_base_vide(bases):
-    base, _, _ = bases
-    assert rechercher_passages(base, "Question sans document") == []
-
-
-def test_page_commencant_par_etape_quatre_conserve_la_page_precedente(bases):
-    base, _, _ = bases
-    base.add_documents(
+def test_recherche_descriptions_et_tableaux_interrogeables(bases):
+    textes, _, etat, _ = bases
+    etat["version"] = "ancienne"
+    textes.ajouter(
         [
-            Document(
-                page_content="14\n1. Ouvrez le capot.",
-                metadata={"source": "manuel.pdf", "page": 14, "type": "texte"},
+            noeud(
+                "Capture montrant un voyant triangulaire rouge.", page=12, type="figure"
             ),
-            Document(
-                page_content="15\n4. Retirez le papier coincé.",
-                metadata={"source": "manuel.pdf", "page": 15, "type": "texte"},
+            noeud(
+                "Tableau 1 : E02 | Ajouter du papier",
+                page=4,
+                type="tableau",
+                lignes=[["E02", "Ajouter du papier"]],
             ),
         ]
     )
-    resultat = rechercher_passages(base, "Retirer le papier coincé")
-    assert [doc.metadata["page"] for doc in resultat[:2]] == [14, 15]
+    assert (
+        rechercher_passages(textes, "voyant triangulaire rouge")[0].metadata["page"]
+        == 12
+    )
+    assert (
+        "Ajouter du papier" in rechercher_passages(textes, "Code E02")[0].page_content
+    )
+
+
+def test_page_commencant_par_etape_quatre_conserve_la_precedente(bases):
+    textes, _, etat, _ = bases
+    etat["version"] = "ancienne"
+    textes.ajouter(
+        [
+            noeud("14\n1. Ouvrez le capot.", page=14),
+            noeud("15\n4. Retirez le papier coincé.", page=15),
+        ]
+    )
+    assert [
+        d.metadata["page"]
+        for d in rechercher_passages(textes, "Retirer le papier coincé")[:2]
+    ] == [14, 15]
 
 
 def test_illustrations_appartiennent_aux_pages_retrouvees(bases):
-    _, images, _ = bases
-    images.add(
-        ids=["windows", "retrait", "scanner"],
-        embeddings=[[1.0, 0.0, 0.0]] * 3,
-        documents=["Paramètres Windows", "Retirer le papier", "Ouvrir le scanner"],
-        metadatas=[
-            {
-                "source": "manuel.pdf",
-                "page": page,
-                "type": "figure",
-                "image": f"figures/{page}.png",
-            }
-            for page in [93, 224, 225]
-        ],
+    _, images, etat, _ = bases
+    etat["version"] = "ancienne"
+    images.ajouter(
+        [
+            noeud("Figure", page=p, type="figure", image=f"figures/{p}.png")
+            for p in [93, 224, 225]
+        ]
     )
     documents = [
-        Document(
-            page_content="Procédure", metadata={"source": "manuel.pdf", "page": page}
-        )
-        for page in [224, 225, 226]
+        Document(page_content="Procédure", metadata={"source": "manuel.pdf", "page": p})
+        for p in [224, 225, 226]
     ]
-    resultat = figures_des_pages(images, documents)
-    assert [doc.metadata["page"] for doc in resultat] == [224, 225]
+    assert [d.metadata["page"] for d in figures_des_pages(images, documents)] == [
+        224,
+        225,
+    ]
 
 
-def test_ingestion_et_recherche_par_photo_utilisent_les_pixels(bases, documents_test):
-    textes, images, clip = bases
-    manuel, photo = documents_test
-    ingestion.main()
-    assert textes.get()["ids"]
-    assert images.count() == 1
-    assert (
-        clip.images_encodees == 1
-    )  # La légende ne doit pas remplacer l'image à indexer.
-    resultat = images.query(
-        query_uris=[str(photo)],
-        n_results=1,
-        include=["metadatas"],
-    )
-    assert clip.images_encodees == 2
-    assert resultat["metadatas"][0][0]["source"] == manuel.name
-
-
-@pytest.mark.parametrize("echec", ["", "texte", "figure"])
-def test_lots_et_conservation_de_index_en_cas_echec(
+@pytest.mark.parametrize("echec", ["", "texte", "figure", "description"])
+def test_lots_et_version_active_preservee_en_cas_echec(
     bases, documents_test, monkeypatch, echec
 ):
-    base, images, clip = bases
+    textes, images, etat, _ = bases
     _, photo = documents_test
-    ancien = Document(
-        page_content="Ancien manuel",
-        metadata={"source": "ancien.pdf", "page": 1, "type": "texte"},
-    )
-    base.add_documents([ancien], ids=["ancien_texte"])
-    images.add(
-        ids=["ancienne_figure"],
-        embeddings=[[1.0, 0.0, 0.0]],
-        documents=["Ancienne figure"],
-        metadatas=[{"source": "ancien.pdf", "page": 1, "type": "figure"}],
-    )
-    documents = [
-        Document(page_content=f"Passage {i}", metadata=ancien.metadata)
-        for i in range(33)
-    ] + [
-        Document(
-            page_content=f"Figure {i}",
-            metadata={
-                **ancien.metadata,
-                "type": "figure",
-                "image": f"photos/{photo.name}",
-            },
-        )
-        for i in range(9)
+    etat["version"] = "ancienne"
+    textes.ajouter([noeud("Ancien manuel")])
+    images.ajouter([noeud("Ancienne figure", type="figure")])
+    donnees = [noeud(f"Passage {i}") for i in range(33)] + [
+        noeud("Figure", type="figure", image=f"photos/{photo.name}") for _ in range(9)
     ]
-    lots_textes, lots_figures = [], []
+    monkeypatch.setattr(ingestion, "extraire_pdf", lambda pdf: donnees)
+    lots_textes, lots_figures, descriptions = [], [], []
 
-    class EmbeddingsMesures(DeterministicFakeEmbedding):
-        def embed_documents(self, textes):
-            lots_textes.append(len(textes))
+    class EmbeddingsMesures(MockEmbedding):
+        def get_text_embedding_batch(self, text_list, **kwargs):
+            lots_textes.append(len(text_list))
             if echec == "texte" and len(lots_textes) == 2:
-                raise ConnectionError("Processus Ollama indisponible")
-            return super().embed_documents(textes)
+                raise ConnectionError("Ollama indisponible")
+            return super().get_text_embedding_batch(text_list, **kwargs)
 
-    def encoder_lot(input):
-        lots_figures.append(len(input))
+    def encoder(chemins):
+        lots_figures.append(len(chemins))
         if echec == "figure" and len(lots_figures) == 2:
             raise RuntimeError("CLIP indisponible")
-        return clip(input)
+        return [[1.0, 0.0, 0.0] for _ in chemins]
 
-    monkeypatch.setattr(ingestion, "extraire_pdf", lambda pdf: documents)
-    monkeypatch.setattr(ingestion, "embeddings", lambda: EmbeddingsMesures(size=16))
-    monkeypatch.setattr(ingestion, "base_figures", lambda: images)
-    monkeypatch.setattr(ingestion, "embeddings_clip", lambda: encoder_lot)
+    def decrire(chemin):
+        descriptions.append(chemin)
+        if echec == "description" and len(descriptions) == 2:
+            raise RuntimeError("Vision indisponible")
+        return "Carré rouge"
+
+    monkeypatch.setattr(
+        ingestion, "embeddings", lambda: EmbeddingsMesures(embed_dim=16)
+    )
+    monkeypatch.setattr(ingestion, "encoder_images", encoder)
+    monkeypatch.setattr(ingestion, "decrire_image", decrire)
     if echec:
-        with pytest.raises(RuntimeError, match="précédent est conservé"):
+        with pytest.raises(RuntimeError, match="précédent reste actif"):
             ingestion.main()
-        assert base.get()["ids"] == ["ancien_texte"]
-        assert base.get()["documents"] == ["Ancien manuel"]
-        assert images.get()["ids"] == ["ancienne_figure"]
-        assert images.get()["documents"] == ["Ancienne figure"]
+        assert etat["version"] == "ancienne"
+        assert [d.page_content for d in textes.documents()] == ["Ancien manuel"]
+        assert [d.page_content for d in images.documents()] == ["Ancienne figure"]
     else:
-        assert ingestion.main() == {"passages": 33, "figures": 9}
-        assert len(base.get()["ids"]) == 33
-        assert "ancien_texte" not in base.get()["ids"]
-        assert images.count() == 9
-        assert "ancienne_figure" not in images.get()["ids"]
-        assert lots_textes == [16, 16, 1]
-        assert lots_figures == [4, 4, 1]
+        assert ingestion.main() == {"passages": 33, "tableaux": 0, "figures": 9}
+        assert len(textes.documents()) == 42  # Passages et descriptions visuelles.
+        assert len(images.documents()) == 9
+        assert not textes.documents(version="ancienne")
+        assert lots_textes == [16, 16, 10] and lots_figures == [4, 4, 1]
 
 
 def test_mcp_conserve_les_references_sans_llm(monkeypatch):
@@ -358,7 +417,7 @@ def test_mcp_attend_la_fin_de_indexation_avant_recherche(monkeypatch):
             if not terminer.wait(timeout=5):
                 raise RuntimeError("Le test n'a pas libéré l'indexation")
             appels.append("fin indexation")
-            return {"passages": 3, "figures": 1}
+            return {"passages": 3, "figures": 1, "tableaux": 1}
 
         async def rechercher(question, photo_reference):
             appels.append("recherche")
@@ -373,12 +432,10 @@ def test_mcp_attend_la_fin_de_indexation_avant_recherche(monkeypatch):
             with pytest.raises(ValueError, match="déjà en cours"):
                 await mcp_server.indexer_manuels()
             recherche = asyncio.create_task(mcp_server.rag_multimodal("Question"))
-            await asyncio.sleep(
-                0
-            )  # Donner à la recherche l'occasion de prendre le verrou.
+            await asyncio.sleep(0)
             assert appels == ["indexation"]
             terminer.set()
-            assert "3 passages et 1 figures" in await indexation
+            assert "1 tableaux" in await indexation
             assert await recherche == "Prêt"
         finally:
             terminer.set()

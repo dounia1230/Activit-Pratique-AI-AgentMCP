@@ -29,7 +29,8 @@ async def indexer_manuels() -> str:
         resultat = await asyncio.to_thread(reconstruire_index)
     return (
         f"Indexation terminée : {resultat['passages']} passages et "
-        f"{resultat['figures']} figures. Vous pouvez poser votre question."
+        f"{resultat['figures']} figures décrites et {resultat.get('tableaux', 0)} tableaux. "
+        "Vous pouvez poser votre question."
     )
 
 

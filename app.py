@@ -86,7 +86,9 @@ def main():
                 f"PDF ajouté : {st.session_state['import_pdf']}. Lancez l'indexation ci-dessous."
             )
         if st.button("Indexer les PDF", key="indexer"):
-            with st.spinner("Indexation des manuels et de leurs figures…"):
+            with st.spinner(
+                "Extraction des tableaux, description des images et indexation PGVector…"
+            ):
                 try:
                     resultat = asyncio.run(indexer_manuels())
                 except Exception as erreur:
@@ -95,7 +97,8 @@ def main():
                     st.session_state.pop("import_pdf", None)
                     st.success(resultat)
         st.caption(
-            "L'indexation traite tous les PDF ajoutés. Une photo sert à retrouver des figures similaires."
+            "Les PDF sont analysés avec LlamaIndex : texte, tableaux et descriptions visuelles. "
+            "Une photo sert à retrouver des figures similaires avec CLIP."
         )
         st.divider()
         photos = sorted(

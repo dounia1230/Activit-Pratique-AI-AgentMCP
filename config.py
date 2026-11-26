@@ -4,9 +4,9 @@ import os
 from functools import cache
 from pathlib import Path
 
-from chromadb.utils.embedding_functions import OpenCLIPEmbeddingFunction
 from dotenv import load_dotenv
-from langchain_ollama import ChatOllama, OllamaEmbeddings
+from langchain_ollama import ChatOllama
+from llama_index.embeddings.ollama import OllamaEmbedding
 
 ROOT = Path(__file__).resolve().parent
 load_dotenv(ROOT / ".env")
@@ -16,6 +16,9 @@ CHAT_MODEL = os.getenv("CHAT_MODEL", "qwen3.5:4b")
 CLIP_MODEL = os.getenv("CLIP_MODEL", "ViT-B-32")
 CLIP_CHECKPOINT = os.getenv("CLIP_CHECKPOINT", "openai")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "nomic-embed-text")
+EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "768"))
+VISION_MODEL = os.getenv("VISION_MODEL", CHAT_MODEL)
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres@127.0.0.1:5432/sav_mcp")
 MCP_URL = os.getenv("MCP_URL", "http://127.0.0.1:24000/mcp")
 
 
@@ -31,24 +34,18 @@ def modele():
     )
 
 
+@cache
 def embeddings():
     # Le petit modèle d'embeddings reste sur CPU, sans démarrage CUDA.
-    return OllamaEmbeddings(
-        model=EMBEDDING_MODEL,
+    nomic = EMBEDDING_MODEL.startswith("nomic-embed-text")
+    return OllamaEmbedding(
+        model_name=EMBEDDING_MODEL,
         base_url=OLLAMA_URL,
-        num_gpu=0,
-        num_ctx=2048,
+        embed_batch_size=16,
+        text_instruction="search_document: " if nomic else None,
+        query_instruction="search_query: " if nomic else None,
+        ollama_additional_kwargs={"num_gpu": 0, "num_ctx": 2048},
         client_kwargs={"timeout": 90},
-    )
-
-
-@cache
-def embeddings_clip():
-    """Charger CLIP une seule fois ; les calculs restent locaux sur CPU."""
-    return OpenCLIPEmbeddingFunction(
-        model_name=CLIP_MODEL,
-        checkpoint=CLIP_CHECKPOINT,
-        device="cpu",
     )
 
 

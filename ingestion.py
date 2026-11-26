@@ -1,85 +1,169 @@
-"""Étape 3 : texte avec Ollama, figures avec CLIP, stockage dans ChromaDB."""
+"""Extraire avec LlamaIndex, décrire les figures et indexer dans PostgreSQL."""
 
 import hashlib
+import re
 from uuid import uuid4
 
-import chromadb
 import pymupdf
-from chromadb.utils.data_loaders import ImageLoader
-from langchain_chroma import Chroma
-from langchain_core.documents import Document
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+from llama_index.core import Document
+from llama_index.core.node_parser import SentenceSplitter
+from llama_index.core.schema import ImageDocument, TextNode
+from llama_index.readers.file import PyMuPDFReader
 
-from config import (
-    CLIP_CHECKPOINT,
-    CLIP_MODEL,
-    DATA,
-    EMBEDDING_MODEL,
-    embeddings,
-    embeddings_clip,
+from config import DATA, embeddings
+from stockage import (
+    base_documentaire,
+    base_figures,
+    etat_index,
+    preparer_stockage,
+    publier_index,
 )
+from vision import decrire_image, encoder_images
 
 
-def base_documentaire():
-    # Une autre configuration de modèles utilise une autre collection.
-    version = hashlib.sha256(f"v2:{EMBEDDING_MODEL}".encode()).hexdigest()[:12]
-    return Chroma(
-        collection_name=f"manuels_{version}",
-        persist_directory=str(DATA / "chroma"),
-        embedding_function=embeddings(),
-        collection_metadata={"hnsw:space": "cosine"},
-    )
+def markdown_tableau(lignes):
+    def ligne(cellules):
+        return (
+            "| "
+            + " | ".join(
+                (c or "").replace("\n", " ").replace("|", "\\|") for c in cellules
+            )
+            + " |"
+        )
 
-
-def base_figures():
-    # CLIP et les embeddings textuels ont des dimensions différentes.
-    version = hashlib.sha256(f"v1:{CLIP_MODEL}:{CLIP_CHECKPOINT}".encode()).hexdigest()[
-        :12
-    ]
-    client = chromadb.PersistentClient(path=str(DATA / "chroma"))
-    return client.get_or_create_collection(
-        name=f"figures_clip_{version}",
-        embedding_function=embeddings_clip(),
-        data_loader=ImageLoader(),
-        metadata={"hnsw:space": "cosine"},
+    return "\n".join(
+        [
+            ligne(lignes[0]),
+            ligne(["---"] * len(lignes[0])),
+            *[ligne(r) for r in lignes[1:]],
+        ]
     )
 
 
 def extraire_pdf(pdf):
-    documents = []
-    dossier = DATA / "figures" / pdf.stem
+    # Le lecteur et les documents LlamaIndex conservent une entrée par page.
+    pages = PyMuPDFReader().load_data(file_path=pdf)
+    empreinte = hashlib.sha256(pdf.read_bytes()).hexdigest()[:12]
+    dossier = DATA / "figures" / f"{pdf.stem}_{empreinte}"
     dossier.mkdir(parents=True, exist_ok=True)
+    documents, figures, tableaux = [], [], []
     with pymupdf.open(pdf) as manuel:
         for numero, page in enumerate(manuel, start=1):
             metadata = {"source": pdf.name, "page": numero, "type": "texte"}
-            texte = page.get_text().strip()
+            texte = pages[numero - 1].text.strip()
             if texte:
-                documents.append(Document(page_content=texte, metadata=metadata))
-
-            # Les blocs image correspondent aux figures intégrées au PDF.
+                documents.append(Document(text=texte, metadata=metadata))
+            zones_tableaux = []
+            for index, tableau in enumerate(
+                page.find_tables(strategy="lines_strict", use_layout=False).tables,
+                start=1,
+            ):
+                lignes = tableau.extract()
+                if not lignes or not lignes[0]:
+                    continue
+                # Le détecteur peut ajouter une colonne de séparation entièrement vide.
+                colonnes = [
+                    i
+                    for i in range(len(lignes[0]))
+                    if any((r[i] or "").strip() for r in lignes)
+                ]
+                lignes = [[r[i] for i in colonnes] for r in lignes]
+                if not colonnes:
+                    continue
+                zones_tableaux.append(pymupdf.Rect(tableau.bbox))
+                # Les lignes/colonnes restent dans les métadonnées JSONB de PostgreSQL.
+                corps = lignes[1:] or [[]]
+                for debut in range(0, len(corps), 15):
+                    bloc = [lignes[0], *[r for r in corps[debut : debut + 15] if r]]
+                    tableaux.append(
+                        TextNode(
+                            text=f"Tableau {index}, {pdf.name}, page {numero}.\n"
+                            + markdown_tableau(bloc),
+                            metadata={
+                                **metadata,
+                                "type": "tableau",
+                                "tableau": index,
+                                "lignes": bloc,
+                                "ligne_debut": debut + 1,
+                                "bbox": list(tableau.bbox),
+                            },
+                        )
+                    )
+            zones_images = []
             for index, bloc in enumerate(page.get_text("dict")["blocks"], start=1):
                 if bloc["type"] != 1:
                     continue
-                image = dossier / f"page_{numero}_figure_{index}.png"
-                pixmap = pymupdf.Pixmap(bloc["image"])
-                if pixmap.colorspace is None or pixmap.colorspace.n > 3:
-                    pixmap = pymupdf.Pixmap(pymupdf.csRGB, pixmap)
-                pixmap.save(image)
-                documents.append(
-                    Document(
-                        # Le texte de la même page permet d'expliquer la figure retrouvée.
-                        page_content=f"Figure du manuel {pdf.name}, page {numero}.\n{texte[:2000]}",
+                zones_images.append(pymupdf.Rect(bloc["bbox"]))
+                chemin = dossier / f"page_{numero}_figure_{index}.png"
+                pixels = pymupdf.Pixmap(bloc["image"])
+                if pixels.colorspace is None or pixels.colorspace.n > 3:
+                    pixels = pymupdf.Pixmap(pymupdf.csRGB, pixels)
+                pixels.save(chemin)
+                figures.append(
+                    ImageDocument(
+                        image_path=str(chemin),
                         metadata={
                             **metadata,
                             "type": "figure",
-                            "image": str(image.relative_to(DATA)),
+                            "image": str(chemin.relative_to(DATA)),
+                            "origine": "image_integree",
+                            "bbox": list(bloc["bbox"]),
                         },
                     )
                 )
-    splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=120)
-    textes = [doc for doc in documents if doc.metadata["type"] == "texte"]
-    figures = [doc for doc in documents if doc.metadata["type"] == "figure"]
-    return splitter.split_documents(textes) + figures
+            # Les schémas vectoriels n'apparaissent pas dans les blocs image du PDF.
+            dessins = [
+                d
+                for d in page.get_drawings()
+                if max(d["rect"].width, d["rect"].height) >= 12
+            ]
+            # Les pages très complexes deviennent un aperçu unique, sans regroupement coûteux.
+            if len(dessins) > 200:
+                ensemble = pymupdf.Rect()
+                for dessin in dessins:
+                    ensemble |= dessin["rect"]
+                zones = [ensemble]
+            else:
+                zones = page.cluster_drawings(drawings=dessins)
+            for index, zone in enumerate(zones, start=1):
+                zone = pymupdf.Rect(zone)
+                if zone.width < 60 or zone.height < 60:
+                    continue
+                if any(
+                    (zone & autre).get_area() / min(zone.get_area(), autre.get_area())
+                    > 0.8
+                    for autre in zones_tableaux + zones_images
+                    if autre.get_area() > 0
+                ):
+                    continue
+                clip = (
+                    pymupdf.Rect(zone.x0 - 6, zone.y0 - 6, zone.x1 + 6, zone.y1 + 6)
+                    & page.rect
+                )
+                if clip.is_empty:
+                    continue
+                chemin = dossier / f"page_{numero}_dessin_{index}.png"
+                page.get_pixmap(clip=clip, dpi=120, alpha=False).save(chemin)
+                figures.append(
+                    ImageDocument(
+                        image_path=str(chemin),
+                        metadata={
+                            **metadata,
+                            "type": "figure",
+                            "image": str(chemin.relative_to(DATA)),
+                            "origine": "dessin_vectoriel",
+                            "bbox": list(zone),
+                        },
+                    )
+                )
+    # Tokenisation locale explicite : aucun modèle/API distant n'est utilisé.
+    splitter = SentenceSplitter(
+        chunk_size=256,
+        chunk_overlap=32,
+        tokenizer=str.split,
+        chunking_tokenizer_fn=lambda texte: re.split(r"(?<=[.!?])\s+|\n\n", texte),
+    )
+    return splitter.get_nodes_from_documents(documents) + tableaux + figures
 
 
 def main():
@@ -88,68 +172,91 @@ def main():
         raise ValueError(
             "Ajoute un manuel PDF dans data/manuels, ou importe-le depuis Streamlit."
         )
-    documents = []
+    preparer_stockage()
+    ancien = etat_index()
+    ancienne_version = ancien["version"] if ancien else None
+    noeuds = []
     for pdf in pdfs:
-        print(f"Extraction : {pdf.name}", flush=True)
-        documents.extend(extraire_pdf(pdf))
-    if not documents:
-        raise ValueError("Aucun texte ni figure extrait : vérifier les PDF.")
-
-    textes = [doc for doc in documents if doc.metadata["type"] == "texte"]
-    figures = [doc for doc in documents if doc.metadata["type"] == "figure"]
-    base = base_documentaire()
-    anciens_textes = base.get()["ids"]
+        print(f"Extraction LlamaIndex : {pdf.name}", flush=True)
+        noeuds.extend(extraire_pdf(pdf))
+    if not noeuds:
+        raise ValueError("Aucun texte, tableau ni figure extrait : vérifier les PDF.")
     version = uuid4().hex
-    nouveaux_textes, nouvelles_figures = [], []
-    images = None
+    textes = [n for n in noeuds if n.metadata["type"] != "figure"]
+    figures = [n for n in noeuds if n.metadata["type"] == "figure"]
+    base, images = base_documentaire(), base_figures()
+    modele = embeddings()
+    compteurs = {
+        "passages": sum(n.metadata["type"] == "texte" for n in textes),
+        "tableaux": len(
+            {
+                (n.metadata["source"], n.metadata["page"], n.metadata["tableau"])
+                for n in textes
+                if n.metadata["type"] == "tableau"
+            }
+        ),
+        "figures": len(figures),
+    }
     try:
-        # Un long manuel ne doit pas devenir une requête Ollama géante.
+        for index, figure in enumerate(figures, start=1):
+            description = decrire_image(DATA / figure.metadata["image"])
+            textes.append(
+                TextNode(
+                    text="Description visuelle générée, à confirmer avec le manuel :\n"
+                    + description,
+                    metadata={**figure.metadata, "description": description},
+                )
+            )
+            print(f"Descriptions visuelles : {index}/{len(figures)}", flush=True)
         for debut in range(0, len(textes), 16):
             lot = textes[debut : debut + 16]
-            ids = [f"{version}_texte_{debut + i}" for i in range(len(lot))]
-            nouveaux_textes.extend(ids)
-            base.add_documents(lot, ids=ids)
-            print(f"Texte : {debut + len(lot)}/{len(textes)}", flush=True)
-
-        # Charger CLIP après le calcul textuel limite le pic de mémoire.
-        images = base_figures()
-        anciennes_figures = images.get()["ids"]
+            vecteurs = modele.get_text_embedding_batch([n.get_content() for n in lot])
+            for i, (noeud, vecteur) in enumerate(zip(lot, vecteurs)):
+                noeud.id_ = f"{version}_texte_{debut + i}"
+                noeud.metadata["version"] = version
+                noeud.embedding = vecteur
+            base.ajouter(lot)
+            print(
+                f"Texte, tableaux et descriptions : {debut + len(lot)}/{len(textes)}",
+                flush=True,
+            )
         for debut in range(0, len(figures), 4):
             lot = figures[debut : debut + 4]
-            ids = [f"{version}_figure_{debut + i}" for i in range(len(lot))]
-            uris = [str(DATA / doc.metadata["image"]) for doc in lot]
-            # Charger seulement les pixels du lot, jamais toutes les figures à la fois.
-            vecteurs = embeddings_clip()(input=ImageLoader()(uris))
-            nouvelles_figures.extend(ids)
-            images.add(
-                ids=ids,
-                embeddings=vecteurs,
-                uris=uris,
-                documents=[doc.page_content for doc in lot],
-                metadatas=[doc.metadata for doc in lot],
-            )
-            print(f"Figures : {debut + len(lot)}/{len(figures)}", flush=True)
+            vecteurs = encoder_images([DATA / n.metadata["image"] for n in lot])
+            noeuds_images = []
+            for i, (figure, vecteur) in enumerate(zip(lot, vecteurs)):
+                description = decrire_image(DATA / figure.metadata["image"])
+                noeuds_images.append(
+                    TextNode(
+                        id_=f"{version}_figure_{debut + i}",
+                        text=description,
+                        embedding=vecteur,
+                        metadata={
+                            **figure.metadata,
+                            "description": description,
+                            "version": version,
+                        },
+                    )
+                )
+            images.ajouter(noeuds_images)
+            print(f"Figures CLIP : {debut + len(lot)}/{len(figures)}", flush=True)
     except Exception as erreur:
-        # Les identifiants uniques permettent de retirer uniquement l'essai raté.
-        if nouveaux_textes:
-            base.delete(ids=nouveaux_textes)
-        if images is not None and nouvelles_figures:
-            images.delete(ids=nouvelles_figures)
+        base.supprimer(version)
+        images.supprimer(version)
         raise RuntimeError(
-            "Indexation interrompue ; les nouveaux lots ont été retirés et l'index "
-            "précédent est conservé. Vérifiez Ollama, puis réessayez. "
-            f"Détail : {erreur}"
+            "Indexation interrompue ; l'index précédent reste actif. Les descriptions déjà calculées sont conservées pour réessayer."
+            f" Détail : {erreur}"
         ) from erreur
-
-    # Ne retirer l'ancien index qu'après le succès de tous les lots.
-    if anciens_textes:
-        base.delete(ids=anciens_textes)
-    if anciennes_figures:
-        images.delete(ids=anciennes_figures)
+    # Une seule transaction publie la version commune aux deux espaces vectoriels.
+    publier_index(version, compteurs)
+    if ancienne_version:
+        base.supprimer(ancienne_version)
+        images.supprimer(ancienne_version)
     print(
-        f"{len(textes)} passages et {len(figures)} figures CLIP indexés dans data/chroma."
+        f"PGVector : {compteurs['passages']} passages, {compteurs['tableaux']} tableaux et {compteurs['figures']} figures décrites indexés.",
+        flush=True,
     )
-    return {"passages": len(textes), "figures": len(figures)}
+    return compteurs
 
 
 if __name__ == "__main__":

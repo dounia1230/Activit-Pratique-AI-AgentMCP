@@ -1,98 +1,126 @@
-# SAV — LangGraph et MCP
+# SAV — LlamaIndex, PGVector, LangChain et MCP
 
-Activité pratique du cours de Pr. Youssfi : un agent répond aux questions sur les manuels, un autre vérifie la garantie dans un registre JSON en lecture seule. L'orchestrateur choisit un agent, récupère sa réponse puis termine.
+Projet pédagogique SAV : les PDF techniques sont analysés avec LlamaIndex, leurs tableaux sont extraits et leurs images décrites par un modèle de vision local. PostgreSQL/PGVector conserve les embeddings et les métadonnées. Un orchestrateur LangGraph choisit l'agent documentaire ou l'agent de garantie, récupère sa réponse puis termine.
+
+Le parcours reste **orchestrateur → un agent spécialisé → orchestrateur → END**. Le registre `data/garanties.json` est un jeu de données fictif consulté uniquement en lecture.
 
 ## Installation
 
-Python 3.11+, [uv](https://docs.astral.sh/uv/) et [Ollama](https://ollama.com/) sont nécessaires.
+Python 3.11+, [uv](https://docs.astral.sh/uv/), [Ollama](https://ollama.com/) et PostgreSQL avec [pgvector](https://github.com/pgvector/pgvector) sont nécessaires. Un serveur PostgreSQL existant peut être utilisé avec une base dédiée à ce projet.
 
 ```powershell
 uv sync
-Copy-Item .env.example .env
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 ollama pull qwen3.5:4b
 ollama pull nomic-embed-text
 ```
 
-Démarrer Ollama si nécessaire avec `ollama serve`. Les modèles et les adresses se règlent dans `.env`. Le modèle de chat doit accepter les outils et les sorties JSON. La vision utilise CLIP (`ViT-B-32`, poids `openai`), téléchargé au premier lancement puis exécuté localement sur CPU.
+Si `.env` existe déjà, le conserver et ajouter seulement les nouvelles variables indiquées dans `.env.example`. Ce fichier contient la connexion PostgreSQL et reste exclu de Git. Les modèles s'exécutent localement ; démarrer Ollama avec `ollama serve` si nécessaire.
 
-## Préparer les documents
+Avec un compte administrateur PostgreSQL, préparer une base et activer l'extension :
 
-Placer les manuels PDF dans `data/manuels/` et les photos dans `data/photos/`.
+```sql
+CREATE ROLE sav_user LOGIN PASSWORD 'choisir_un_mot_de_passe';
+CREATE DATABASE sav_mcp OWNER sav_user;
+-- Se connecter ensuite à sav_mcp avec le compte administrateur :
+CREATE EXTENSION IF NOT EXISTS vector;
+```
 
-Un vrai document pour commencer : le [guide officiel Epson ET-2850 en français](https://files.support.epson.com/docid/cpd6/cpd60207.pdf), avec 279 pages et des images intégrées. Il couvre notamment le chargement du papier, le Wi-Fi, l'entretien et la résolution des pannes.
+Configurer `DATABASE_URL` dans `.env` avec le nom de la base, l'utilisateur, le mot de passe et le port réels. Les caractères réservés du mot de passe doivent être encodés dans l'URL. L'application crée son schéma `sav_mcp` et ses tables dans cette base ; elle ne prépare pas un serveur PostgreSQL à elle seule.
 
-Le fichier téléchargé est `data/manuels/epson_et2850_guide_fr.pdf`. Pour le récupérer sur une nouvelle installation, puis l'indexer :
+Configuration principale :
+
+| Variable | Rôle | Valeur par défaut |
+| --- | --- | --- |
+| `OLLAMA_URL` | Serveur Ollama local | `http://localhost:11434` |
+| `CHAT_MODEL` | Routage et génération de réponses | `qwen3.5:4b` |
+| `VISION_MODEL` | Description des pixels des images | Valeur de `CHAT_MODEL` |
+| `EMBEDDING_MODEL` | Embeddings textuels open source | `nomic-embed-text` |
+| `EMBEDDING_DIM` | Dimension du modèle textuel | `768` |
+| `CLIP_MODEL` / `CLIP_CHECKPOINT` | Embeddings visuels locaux | `ViT-B-32` / `openai` |
+| `DATABASE_URL` | Connexion à la base PostgreSQL dédiée | Voir `.env.example` |
+| `MCP_URL` | Serveur documentaire Streamable HTTP | `http://127.0.0.1:24000/mcp` |
+
+Le modèle de chat doit accepter les outils et les sorties JSON. Le modèle de vision doit accepter les images : Qwen3.5 convient pour les deux usages. CLIP est chargé une fois par processus sur CPU ; ses poids sont téléchargés au premier usage si absents.
+
+## Documents, tableaux et images
+
+Placer les manuels dans `data/manuels/` et les photos dans `data/photos/`, ou les importer dans Streamlit. Un document de départ est le [manuel officiel Epson ET-2850 en français](https://files.support.epson.com/docid/cpd6/cpd60207.pdf), comprenant 279 pages, du texte, des illustrations et des tableaux.
 
 ```powershell
 Invoke-WebRequest -Uri "https://files.support.epson.com/docid/cpd6/cpd60207.pdf" -OutFile "data/manuels/epson_et2850_guide_fr.pdf"
 uv run ingestion.py
 ```
 
-Si le PDF est déjà présent, lancer seulement l'ingestion, ou utiliser **Indexer les PDF** dans Streamlit. Le PDF reste local, hors de Git. Les références de page correspondent aux pages du PDF complet. Le registre de garantie fourni reste un jeu de données pédagogique fictif, indépendant de ce manuel Epson.
+Si le PDF est déjà présent, lancer seulement l'ingestion. Les PDF, photos, figures extraites et descriptions restent locaux et exclus de Git.
 
-ChromaDB conserve deux collections : texte avec les embeddings Ollama, figures avec CLIP. La recherche textuelle combine les mots-clés des pages indexées (BM25 et racines françaises avec Snowball) et la recherche sémantique. Elle conserve les mots de la question d'origine, reconnaît un modèle présent dans le nom du manuel et inclut les pages voisines pour retrouver les étapes et précautions d'une procédure. Les tables des matières riches en pointillés sont écartées du classement lexical. La sélection textuelle est limitée à six pages. Cette recherche utilise l'index existant, sans réindexation nécessaire pour ce changement.
+L'ingestion fonctionne ainsi :
 
-Une photo recherche les figures visuellement proches ; sans photo, les illustrations sont choisies uniquement parmi les pages retrouvées, pour éviter les captures ou schémas sans rapport. La réponse s'appuie sur le texte de ces pages. CLIP ne lit pas les codes d'erreur et ne produit pas de descriptions. Les dessins vectoriels ne sont pas indexés comme figures séparées ; en l'absence de figure extraite disponible, Streamlit affiche jusqu'à deux aperçus des pages citées, qui conservent ces dessins. L'OCR complet des documents scannés n'est pas pris en charge. Relancer l'ingestion après modification des manuels ou des modèles, sans requête en cours : les collections actives sont reconstruites.
+1. Le lecteur PDF et le découpage LlamaIndex produisent les passages avec leur fichier et leur page. PyMuPDF complète le lecteur pour extraire les images intégrées, convertir les zones de dessins vectoriels en figures et détecter les tableaux par leurs bordures. Les bordures de tableaux et les petites décorations sont écartées de cette recherche de schémas.
+2. Les tableaux sont conservés en lignes/colonnes dans les métadonnées JSONB. Une représentation Markdown est indexée pour répondre aux questions sur leurs valeurs. Les grands tableaux sont répartis en groupes de quinze lignes, avec les en-têtes répétés.
+3. Qwen vision décrit réellement les pixels de chaque image. Ces descriptions sont indexées dans l'espace textuel pour rendre les figures interrogeables par mots-clés ou similarité sémantique. Le texte de la page n'est pas utilisé à la place d'une description visuelle.
+4. CLIP calcule des embeddings dans un espace visuel séparé de 512 dimensions, utilisé pour retrouver les figures similaires à une photo. Les embeddings textuels et CLIP sont enregistrés dans deux tables PGVector distinctes, avec leurs métadonnées.
 
-L'indexation envoie 16 passages à la fois à Ollama et traite les figures par lots de 4 pour limiter la mémoire utilisée. Le modèle d'embeddings utilise le CPU, un contexte de 2048 tokens et un délai réseau de 90 secondes ; le modèle de chat garde sa configuration habituelle. Un long manuel peut prendre plusieurs minutes ; l'appel d'indexation MCP accepte jusqu'à 30 minutes d'attente. L'ancien index est retiré seulement après le succès de tous les lots. Si le calcul ou l'ajout d'un lot échoue, les nouveaux lots sont supprimés et les entrées de l'ancien index restent disponibles. Cette protection concerne les erreurs gérées par le programme, pas un arrêt brutal du processus.
+Le texte utilise les préfixes `search_document:` et `search_query:` lorsque le modèle est Nomic. Les embeddings textuels sont calculés par lots de seize sur CPU ; CLIP traite les figures par lots de quatre. Les descriptions sont mises en cache dans `data/descriptions/`, selon les pixels et le modèle de vision, pour éviter de les recalculer après une interruption. Une première indexation avec beaucoup d'images peut être longue ; suivre la progression dans le terminal MCP.
 
-Si une erreur mentionne `/tokenize` et un port local variable, le processus interne du modèle Ollama est devenu indisponible ; ne pas utiliser ce port dans `.env`. Vérifier avec `ollama list`, puis essayer `ollama stop nomic-embed-text` et relancer l'indexation. Si nécessaire, quitter et relancer l'application Ollama. Après une modification du code, redémarrer également `uv run mcp_server.py`. Les erreurs GPU et les détails sont consultables dans `%LOCALAPPDATA%\Ollama\server.log` sous Windows.
+Chaque ingestion reçoit une version. La nouvelle version n'est publiée qu'après le succès du texte, des tableaux, des descriptions et des vecteurs CLIP. PostgreSQL change le pointeur de version active dans une transaction unique. En cas d'échec, l'ancienne version reste consultable ; les descriptions terminées restent en cache. Les anciennes lignes sont retirées après publication. Un arrêt brutal peut laisser des lignes non actives ; elles ne sont pas utilisées pour répondre.
 
-Si l'interface affiche une erreur MCP, les sous-erreurs des groupes `TaskGroup` sont dépliées pour montrer la cause (connexion refusée, délai d'attente, etc.). Les délais de lecture HTTP et de réponse MCP pour l'indexation sont tous deux fixés à 30 minutes. Après une mise à jour, redémarrer aussi Streamlit avec `uv run streamlit run app.py` pour recharger les modules Python. Une déconnexion du navigateur ne garantit pas l'arrêt du calcul côté serveur : ne pas relancer plusieurs fois l'indexation. Le serveur refuse une nouvelle indexation lorsqu'une opération documentaire est déjà en cours.
+Les anciens fichiers ChromaDB ne sont plus utilisés et ne sont pas supprimés automatiquement. **Une nouvelle indexation est nécessaire après cette migration vers PGVector.** Changer les modèles ou leur dimension nécessite également une nouvelle ingestion.
+
+## Recherche et réponses
+
+La recherche combine BM25 avec racines françaises et similarité vectorielle. Elle conserve les mots de la question initiale, reconnaît les modèles dans les noms de manuels, écarte les sommaires riches en pointillés et inclut les pages voisines d'une procédure. Le contexte textuel est limité à six pages et inclut le texte, les tableaux et les descriptions d'images indexées.
+
+Si le modèle répond sans appeler la recherche, par exemple à « c'est quoi le PDF ? », le programme exécute cet outil et redonne ses résultats à l'agent avant de répondre. L'absence d'appel d'outil n'est donc pas présentée comme une panne documentaire.
+
+Sans photo, les illustrations proviennent des pages retrouvées. Avec une photo, CLIP recherche les figures visuellement proches. Les descriptions générées restent des interprétations susceptibles d'erreurs : elles ne remplacent pas les consignes écrites du manuel et une ressemblance ne suffit pas à établir un diagnostic. Les extraits et les images sont des données, jamais des instructions à exécuter.
+
+L'OCR complet des PDF scannés et la reconstruction des tableaux sans bordures ne sont pas garantis. La détection des tableaux est géométrique, sans modèle de mise en page supplémentaire. Un schéma vectoriel peut être réparti en plusieurs figures ; une page contenant beaucoup de tracés devient un aperçu unique pour borner le coût du traitement. Streamlit peut aussi afficher un aperçu des pages citées si aucune figure locale n'est disponible.
 
 ## Lancer
 
-Dans un premier terminal, démarrer le serveur MCP sur `http://127.0.0.1:24000/mcp` :
+Premier terminal, serveur MCP :
 
 ```powershell
 uv run mcp_server.py
 ```
 
-Dans un second terminal :
-
-```powershell
-uv run main.py
-```
-
-Ou poser directement une question :
-
-```powershell
-uv run main.py "Mon imprimante PX200-0042 est-elle sous garantie ?"
-uv run main.py "Comment retirer un bourrage papier sur mon Epson ET-2850 ?"
-```
-
-`--photo` désigne le nom d'un fichier PNG, JPEG ou WebP de `data/photos/`, avec ou sans extension. Chaque question est indépendante. Le parcours garantie fonctionne sans serveur MCP ; son registre est `data/garanties.json`.
-
-Questions possibles avec le manuel Epson indexé : « Comment charger le papier dans mon Epson ET-2850 ? », « Comment configurer le Wi-Fi ? » ou « Comment nettoyer la tête d'impression ? ». Les figures retrouvées apparaissent sous la réponse dans Streamlit lorsqu'elles sont disponibles.
-
-Pour tester la garantie sans LLM :
-
-```powershell
-uv run garantie.py PX200-0042
-```
-
-### Interface Streamlit
-
-Pour utiliser le SAV dans le navigateur, lancer dans le second terminal à la place de `main.py` :
+Second terminal, interface Streamlit :
 
 ```powershell
 uv run streamlit run app.py
 ```
 
-Ouvrir [http://127.0.0.1:8502](http://127.0.0.1:8502). L'adresse IPv4 et le port sont fixés dans `.streamlit/config.toml` pour distinguer cette interface des autres applications locales sur le port 8501. Ollama doit être démarré ; les questions documentaires nécessitent aussi le serveur MCP du premier terminal et l'ingestion des manuels.
+Ouvrir [http://127.0.0.1:8502](http://127.0.0.1:8502). Le port et l'adresse IPv4 sont fixés dans `.streamlit/config.toml` pour distinguer ce projet des autres applications locales. Après une mise à jour, redémarrer MCP et Streamlit pour recharger les modules et la configuration.
 
-Dans la barre latérale :
+Dans la barre latérale : importer un PDF ou une photo (PDF, PNG, JPEG, WebP, 50 Mo maximum), cliquer sur **Importer le fichier**, puis **Indexer les PDF** pour un manuel. Attendre la confirmation avant de poser une question. Une photo importée est sélectionnée pour la prochaine question ; elle n'est pas ajoutée à l'index des manuels.
 
-1. Choisir un **PDF ou une photo** (PNG, JPEG, WebP, 50 Mo maximum), puis cliquer sur **Importer le fichier**. Les fichiers sont vérifiés et enregistrés localement dans `data/manuels/` ou `data/photos/`, avec une empreinte dans leur nom pour éviter d'écraser un autre document.
-2. Pour un PDF, cliquer sur **Indexer les PDF** et attendre la confirmation avant de poser une question. Tous les manuels présents sont réindexés : texte avec Ollama, figures intégrées avec CLIP. Le premier chargement de CLIP peut télécharger ses poids. Les PDF protégés par mot de passe sont refusés.
-3. Une photo importée est sélectionnée automatiquement, avec aperçu, pour la prochaine question. Elle sert à rechercher les figures visuellement proches des manuels ; elle n'est pas ajoutée à l'index des manuels. Choisir « Sans photo » pour poser une question uniquement textuelle.
-4. Poser la question en précisant l'appareil. La réponse affiche le texte sourcé et jusqu'à deux figures retrouvées, avec leur fichier, page et référence. Si aucune figure extraite n'est disponible, des aperçus des pages citées sont affichés à la place. Une figure similaire ne constitue pas à elle seule un diagnostic. Ces aperçus ne réalisent pas d'OCR.
+Exemples de questions :
 
-**Redémarrer le serveur MCP après cette mise à jour**, pour rendre disponible l'outil `indexer_manuels`. L'interface déclenche l'indexation via MCP, sans demander au modèle de la lancer. Le serveur attend la fin d'une recherche avant de reconstruire l'index et attend la fin de cette reconstruction avant de lancer une nouvelle recherche. Ne pas lancer simultanément l'ingestion en ligne de commande ni plusieurs serveurs MCP sur la même base.
+- « Comment retirer un bourrage papier sur mon Epson ET-2850 ? Cite les pages utilisées. »
+- « Quelle est la capacité de chargement du papier selon le tableau du manuel ? »
+- « Retrouve les figures montrant les niveaux d'encre. »
 
-L'historique conserve les questions, réponses, figures et parcours des agents. Chaque question est indépendante : l'historique affiché n'est pas envoyé aux agents. Il reste en mémoire dans la session du navigateur ; le bouton « Effacer l'historique » le vide, sans supprimer les documents ni l'index. Les fichiers importés restent locaux et sont exclus de Git.
+Chaque question est indépendante : l'historique affiché n'est pas envoyé aux agents. Le bouton **Effacer l'historique** vide la session, sans supprimer les documents ni PostgreSQL. Les réponses conservent les références fichier/page/figure et affichent jusqu'à deux illustrations ou aperçus de pages.
 
-## Tests
+Le terminal reste disponible à la place de Streamlit :
+
+```powershell
+uv run main.py
+uv run main.py "Comment retirer un bourrage papier sur mon Epson ET-2850 ?"
+uv run main.py "Que montre le voyant de mon appareil ?" --photo nom_de_la_photo
+uv run garantie.py PX200-0042
+```
+
+`--photo` désigne un fichier de `data/photos/`, avec ou sans extension. La vérification du registre avec `garantie.py` ne nécessite aucun LLM ; le parcours agentique de garantie utilise Ollama mais pas le serveur MCP ni PostgreSQL.
+
+## Dépannage et vérification
+
+PostgreSQL et Ollama doivent rester démarrés. Si la connexion à PostgreSQL échoue, vérifier `DATABASE_URL` et l'extension `vector` dans la bonne base. Ne pas versionner `.env`.
+
+Une erreur `/tokenize` avec un port local variable concerne le processus interne Ollama. Vérifier `ollama list`, essayer `ollama stop nomic-embed-text` puis relancer l'ingestion ; quitter et relancer Ollama si nécessaire. Les journaux Windows se trouvent dans `%LOCALAPPDATA%\Ollama\server.log`.
+
+Les sous-erreurs `TaskGroup` sont affichées explicitement dans Streamlit. L'appel d'indexation attend jusqu'à trente minutes ; une déconnexion du navigateur ne garantit pas l'arrêt du calcul côté serveur. Le serveur refuse une nouvelle indexation pendant une opération documentaire. Ne pas lancer simultanément plusieurs ingestions ou plusieurs serveurs MCP sur la même base.
 
 ```powershell
 uv run pytest -q
@@ -100,10 +128,17 @@ uv run ruff check .
 uv run ruff format --check .
 ```
 
-Les tests utilisent des modèles simulés et une base Chroma temporaire. Les tests de l'interface utilisent `AppTest` de Streamlit avec un graphe simulé. Aucun modèle Ollama ni téléchargement CLIP n'est nécessaire pour les exécuter.
+Les tests courants utilisent des modèles et un index en mémoire simulés, avec de vrais petits PDF pour vérifier l'extraction du texte, des images et des tableaux. Aucun appel Ollama ni téléchargement CLIP n'est nécessaire. Le parcours Streamlit/MCP est également testé en HTTP local avec un outil simulé.
 
-Le bouton d'indexation est aussi testé avec un vrai serveur MCP HTTP local : succès d'un outil simulé et expiration de connexion, avec vérification du message affiché dans Streamlit.
+Pour tester aussi la persistance PGVector réelle, utiliser une base PostgreSQL configurée dans `.env` :
+
+```powershell
+$env:RUN_PG_TESTS = "1"
+uv run pytest -q tests/test_stockage.py
+```
+
+Cet essai crée puis supprime uniquement un schéma de test au nom unique. Il vérifie les métadonnées de tableaux, la recherche vectorielle et la publication de version, sans modèle réel. Les essais manuels avec Ollama/CLIP doivent être signalés séparément des tests simulés.
 
 ## Références
 
-Support « Résumé Agentic AI et MCP », Pr. Youssfi, et exemples [mcp-demo](https://github.com/mohamedYoussfi/mcp-demo) et [agent-rag-as-tool-mcp-v2](https://github.com/mohamedYoussfi/agent-rag-as-tool-mcp-v2/blob/main/mcp-server.py).
+Support « Résumé Agentic AI et MCP », Pr. Youssfi ; [lecteurs LlamaIndex](https://developers.llamaindex.ai/python/framework/module_guides/loading/simpledirectoryreader/), [PGVectorStore](https://developers.llamaindex.ai/python/framework/integrations/vector_stores/postgres/) et [pgvector](https://github.com/pgvector/pgvector).

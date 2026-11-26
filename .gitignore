@@ -6,6 +6,7 @@ __pycache__/
 .ipynb_checkpoints/
 data/chroma/
 data/figures/
+data/descriptions/
 data/manuels/*.pdf
 data/photos/*
 !data/photos/.gitkeep
