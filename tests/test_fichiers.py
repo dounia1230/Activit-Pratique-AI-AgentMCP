@@ -249,3 +249,71 @@ def test_vrai_transport_mcp_et_expiration_de_la_connexion(
             await asyncio.wait_for(tache, timeout=5)
 
     asyncio.run(executer())
+
+
+def test_deux_clients_mcp_attendent_une_seule_indexation(monkeypatch):
+    import threading
+
+    import uvicorn
+    from mcp.server.fastmcp import FastMCP
+
+    import mcp_server
+
+    terminer = threading.Event()
+    calculs = []
+
+    def reconstruire():
+        calculs.append("indexation")
+        if not terminer.wait(timeout=10):
+            raise RuntimeError("Indexation de test non libérée")
+        return {"passages": 3, "tableaux": 1, "figures": 1}
+
+    async def executer():
+        clients = []
+        deux_clients = asyncio.Event()
+        monkeypatch.setattr(mcp_server, "verrou_index", asyncio.Lock())
+        monkeypatch.setattr(mcp_server, "tache_indexation", None)
+        monkeypatch.setattr(mcp_server, "reconstruire_index", reconstruire)
+        mcp = FastMCP("test-concurrence", stateless_http=True, json_response=True)
+
+        @mcp.tool()
+        async def indexer_manuels() -> str:
+            clients.append("appel")
+            if len(clients) == 2:
+                deux_clients.set()
+            return await mcp_server.indexer_manuels()
+
+        serveur = uvicorn.Server(
+            uvicorn.Config(
+                mcp.streamable_http_app(),
+                host="127.0.0.1",
+                port=0,
+                log_level="critical",
+            )
+        )
+        tache = asyncio.create_task(serveur.serve())
+        try:
+            async with asyncio.timeout(5):
+                while not serveur.started:
+                    if tache.done():
+                        await tache
+                    await asyncio.sleep(0.01)
+            port = serveur.servers[0].sockets[0].getsockname()[1]
+            monkeypatch.setattr(fichiers, "MCP_URL", f"http://127.0.0.1:{port}/mcp")
+            premier = asyncio.create_task(fichiers.indexer_manuels())
+            second = asyncio.create_task(fichiers.indexer_manuels())
+            await asyncio.wait_for(deux_clients.wait(), timeout=5)
+            assert not premier.done() and not second.done()
+            terminer.set()
+            resultats = await asyncio.wait_for(
+                asyncio.gather(premier, second), timeout=5
+            )
+            assert resultats[0] == resultats[1]
+            assert "Indexation terminée" in resultats[0]
+            assert calculs == ["indexation"]
+        finally:
+            terminer.set()
+            serveur.should_exit = True
+            await asyncio.wait_for(tache, timeout=5)
+
+    asyncio.run(executer())

@@ -120,7 +120,7 @@ PostgreSQL et Ollama doivent rester démarrés. Si la connexion à PostgreSQL é
 
 Une erreur `/tokenize` avec un port local variable concerne le processus interne Ollama. Vérifier `ollama list`, essayer `ollama stop nomic-embed-text` puis relancer l'ingestion ; quitter et relancer Ollama si nécessaire. Les journaux Windows se trouvent dans `%LOCALAPPDATA%\Ollama\server.log`.
 
-Les sous-erreurs `TaskGroup` sont affichées explicitement dans Streamlit. L'appel d'indexation attend jusqu'à trente minutes ; une déconnexion du navigateur ne garantit pas l'arrêt du calcul côté serveur. Le serveur refuse une nouvelle indexation pendant une opération documentaire. Ne pas lancer simultanément plusieurs ingestions ou plusieurs serveurs MCP sur la même base.
+Les sous-erreurs `TaskGroup` sont affichées explicitement dans Streamlit. L'appel d'indexation attend jusqu'à trente minutes. Une indexation attend la fin d'une recherche documentaire en cours ; plusieurs clics pendant l'indexation attendent le résultat d'un seul calcul. Une déconnexion du navigateur ne libère pas le verrou et n'arrête pas ce calcul. En cas d'échec, un clic suivant peut réessayer. Si un PDF est ajouté pendant l'indexation, relancer celle-ci une fois terminée pour inclure le nouveau document. Ne pas lancer simultanément plusieurs ingestions en ligne de commande ou plusieurs serveurs MCP sur la même base.
 
 ```powershell
 uv run pytest -q

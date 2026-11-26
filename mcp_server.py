@@ -15,16 +15,10 @@ mcp = FastMCP(
     json_response=True,
 )
 verrou_index = asyncio.Lock()
+tache_indexation = None
 
 
-@mcp.tool()
-async def indexer_manuels() -> str:
-    """Reconstruire l'index des PDF de data/manuels, à la demande de l'utilisateur."""
-    if verrou_index.locked():
-        raise ValueError(
-            "Une recherche ou une indexation est déjà en cours. "
-            "Attendez sa fin avant de relancer l'indexation."
-        )
+async def executer_indexation() -> str:
     async with verrou_index:
         resultat = await asyncio.to_thread(reconstruire_index)
     return (
@@ -32,6 +26,16 @@ async def indexer_manuels() -> str:
         f"{resultat['figures']} figures décrites et {resultat.get('tableaux', 0)} tableaux. "
         "Vous pouvez poser votre question."
     )
+
+
+@mcp.tool()
+async def indexer_manuels() -> str:
+    """Indexer les PDF de data/manuels ou attendre l'indexation déjà en cours."""
+    global tache_indexation
+    # Tous les clients attendent le même calcul, même après une déconnexion.
+    if tache_indexation is None or tache_indexation.done():
+        tache_indexation = asyncio.create_task(executer_indexation())
+    return await asyncio.shield(tache_indexation)
 
 
 @mcp.tool()

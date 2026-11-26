@@ -433,7 +433,8 @@ def test_mcp_conserve_les_references_sans_llm(monkeypatch):
     assert "manuel.pdf, page 4, figure : figures/voyant.png" in texte
 
 
-def test_mcp_attend_la_fin_de_indexation_avant_recherche(monkeypatch):
+@pytest.mark.parametrize("deconnexion", [False, True])
+def test_mcp_partage_indexation_et_attend_avant_recherche(monkeypatch, deconnexion):
     terminer = threading.Event()
     appels = []
 
@@ -454,21 +455,88 @@ def test_mcp_attend_la_fin_de_indexation_avant_recherche(monkeypatch):
             return {"reponse": "Prêt", "sources": []}
 
         monkeypatch.setattr(mcp_server, "verrou_index", asyncio.Lock())
+        monkeypatch.setattr(mcp_server, "tache_indexation", None)
         monkeypatch.setattr(mcp_server, "reconstruire_index", reconstruire)
         monkeypatch.setattr(mcp_server, "repondre_documentation", rechercher)
         indexation = asyncio.create_task(mcp_server.indexer_manuels())
         try:
             await asyncio.wait_for(debut.wait(), timeout=5)
-            with pytest.raises(ValueError, match="déjà en cours"):
-                await mcp_server.indexer_manuels()
+            doublon = asyncio.create_task(mcp_server.indexer_manuels())
+            await asyncio.sleep(0)
+            assert not doublon.done()
+            if deconnexion:
+                indexation.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await indexation
+                assert mcp_server.verrou_index.locked()
             recherche = asyncio.create_task(mcp_server.rag_multimodal("Question"))
             await asyncio.sleep(0)
             assert appels == ["indexation"]
             terminer.set()
-            assert "1 tableaux" in await indexation
+            resultat = await doublon
+            assert "1 tableaux" in resultat
+            if not deconnexion:
+                assert await indexation == resultat
             assert await recherche == "Prêt"
         finally:
             terminer.set()
 
     asyncio.run(executer())
     assert appels == ["indexation", "fin indexation", "recherche"]
+
+
+def test_indexation_attend_la_recherche_en_cours(monkeypatch):
+    async def executer():
+        terminer = asyncio.Event()
+        debut = asyncio.Event()
+        appels = []
+
+        async def rechercher(question, photo_reference):
+            debut.set()
+            await terminer.wait()
+            appels.append("recherche terminée")
+            return {"reponse": "Prêt", "sources": []}
+
+        def reconstruire():
+            appels.append("indexation")
+            return {"passages": 3, "tableaux": 1, "figures": 1}
+
+        monkeypatch.setattr(mcp_server, "verrou_index", asyncio.Lock())
+        monkeypatch.setattr(mcp_server, "tache_indexation", None)
+        monkeypatch.setattr(mcp_server, "repondre_documentation", rechercher)
+        monkeypatch.setattr(mcp_server, "reconstruire_index", reconstruire)
+        recherche = asyncio.create_task(mcp_server.rag_multimodal("Question"))
+        await asyncio.wait_for(debut.wait(), timeout=5)
+        indexation = asyncio.create_task(mcp_server.indexer_manuels())
+        try:
+            await asyncio.sleep(0)
+            assert not indexation.done() and not appels
+        finally:
+            terminer.set()
+        await asyncio.wait_for(recherche, timeout=5)
+        assert "terminée" in await asyncio.wait_for(indexation, timeout=5)
+        assert appels == ["recherche terminée", "indexation"]
+
+    asyncio.run(executer())
+
+
+def test_indexation_peut_reessayer_apres_echec(monkeypatch):
+    appels = []
+
+    def reconstruire():
+        appels.append("indexation")
+        if len(appels) == 1:
+            raise RuntimeError("Vision indisponible")
+        return {"passages": 3, "tableaux": 1, "figures": 1}
+
+    async def executer():
+        monkeypatch.setattr(mcp_server, "verrou_index", asyncio.Lock())
+        monkeypatch.setattr(mcp_server, "tache_indexation", None)
+        monkeypatch.setattr(mcp_server, "reconstruire_index", reconstruire)
+        with pytest.raises(RuntimeError, match="Vision indisponible"):
+            await mcp_server.indexer_manuels()
+        assert not mcp_server.verrou_index.locked()
+        assert "terminée" in await mcp_server.indexer_manuels()
+
+    asyncio.run(executer())
+    assert len(appels) == 2

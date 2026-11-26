@@ -96,7 +96,7 @@ def main():
             )
         if st.button("Indexer les PDF", key="indexer"):
             with st.spinner(
-                "Extraction des tableaux, description des images et indexation PGVector…"
+                "Indexation des PDF… Si un traitement est déjà en cours, attente de son résultat."
             ):
                 try:
                     resultat = asyncio.run(indexer_manuels())
@@ -107,7 +107,8 @@ def main():
                     st.success(resultat)
         st.caption(
             "Les PDF sont analysés avec LlamaIndex : texte, tableaux et descriptions visuelles. "
-            "Une photo sert à retrouver des figures similaires avec CLIP."
+            "Une photo sert à retrouver des figures similaires avec CLIP. "
+            "Un clic supplémentaire attend l'indexation existante."
         )
         st.divider()
         photos = sorted(
