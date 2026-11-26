@@ -20,6 +20,11 @@ verrou_index = asyncio.Lock()
 @mcp.tool()
 async def indexer_manuels() -> str:
     """Reconstruire l'index des PDF de data/manuels, à la demande de l'utilisateur."""
+    if verrou_index.locked():
+        raise ValueError(
+            "Une recherche ou une indexation est déjà en cours. "
+            "Attendez sa fin avant de relancer l'indexation."
+        )
     async with verrou_index:
         resultat = await asyncio.to_thread(reconstruire_index)
     return (

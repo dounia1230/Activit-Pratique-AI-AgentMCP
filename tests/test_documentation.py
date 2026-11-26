@@ -263,6 +263,8 @@ def test_mcp_attend_la_fin_de_indexation_avant_recherche(monkeypatch):
         indexation = asyncio.create_task(mcp_server.indexer_manuels())
         try:
             await asyncio.wait_for(debut.wait(), timeout=5)
+            with pytest.raises(ValueError, match="déjà en cours"):
+                await mcp_server.indexer_manuels()
             recherche = asyncio.create_task(mcp_server.rag_multimodal("Question"))
             await asyncio.sleep(
                 0

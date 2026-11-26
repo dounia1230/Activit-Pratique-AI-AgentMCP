@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+import httpx
 import pytest
 from PIL import Image
 from streamlit.testing.v1 import AppTest
@@ -135,6 +136,19 @@ def test_import_pdf_indexation_et_erreur_recuperable(interface, monkeypatch):
     assert not app.exception
     assert "Indexation terminée" in app.success[0].value
     assert "import_pdf" not in app.session_state
+
+
+def test_indexation_affiche_la_cause_du_groupe_erreurs(interface, monkeypatch):
+    app, _ = interface
+
+    async def indexer():
+        raise ExceptionGroup("TaskGroup", [httpx.ConnectError("")])
+
+    monkeypatch.setattr(fichiers, "indexer_manuels", indexer)
+    app.button(key="indexer").click().run()
+    assert not app.exception
+    assert "Serveur MCP injoignable" in app.error[0].value
+    assert "TaskGroup" not in app.error[0].value
 
 
 def test_import_photo_selectionne_sans_relancer_la_question(interface):

@@ -3,8 +3,10 @@
 import asyncio
 from contextlib import asynccontextmanager
 from io import BytesIO
+from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 import pymupdf
 import pytest
 from PIL import Image
@@ -74,9 +76,10 @@ def test_figures_citees_et_pixels_conserves_sans_chemin_externe(tmp_path, monkey
 @pytest.mark.parametrize("erreur", [False, True])
 def test_indexation_utilise_mcp_et_remonte_ses_erreurs(monkeypatch, erreur):
     class Session:
-        async def call_tool(self, nom, arguments):
+        async def call_tool(self, nom, arguments, read_timeout_seconds):
             assert nom == "indexer_manuels"
             assert arguments == {}
+            assert read_timeout_seconds.total_seconds() == 1800
             return SimpleNamespace(
                 isError=erreur,
                 content=[SimpleNamespace(type="text", text="Résultat MCP")],
@@ -85,6 +88,7 @@ def test_indexation_utilise_mcp_et_remonte_ses_erreurs(monkeypatch, erreur):
     class Client:
         def __init__(self, configuration):
             assert configuration["documentation"]["transport"] == "streamable_http"
+            assert configuration["documentation"]["sse_read_timeout"] == 1800
 
         @asynccontextmanager
         async def session(self, nom):
@@ -97,3 +101,97 @@ def test_indexation_utilise_mcp_et_remonte_ses_erreurs(monkeypatch, erreur):
             asyncio.run(fichiers.indexer_manuels())
     else:
         assert asyncio.run(fichiers.indexer_manuels()) == "Résultat MCP"
+
+
+def test_groupe_erreurs_mcp_deplie_la_cause_sans_perdre_les_details():
+    erreur = ExceptionGroup(
+        "unhandled errors in a TaskGroup",
+        [
+            ExceptionGroup("groupe interne", [httpx.ReadTimeout("")]),
+            ValueError("Détail utile"),
+            ValueError("Détail utile"),
+        ],
+    )
+    message = fichiers.message_erreur(erreur)
+    assert "délai d'attente" in message
+    assert "continuer côté serveur" in message
+    assert message.count("Détail utile") == 1
+    assert "TaskGroup" not in message
+
+
+def test_connexion_mcp_refusee_donne_la_commande_de_demarrage():
+    assert "uv run mcp_server.py" in fichiers.message_erreur(httpx.ConnectError(""))
+
+
+@pytest.mark.parametrize("expiration", [False, True])
+def test_vrai_transport_mcp_et_expiration_de_la_connexion(
+    monkeypatch, tmp_path, expiration
+):
+    # Vrai échange HTTP local ; seul le travail d'indexation est simulé.
+    import uvicorn
+    from mcp.server.fastmcp import FastMCP
+    from streamlit.testing.v1 import AppTest
+
+    import config
+
+    monkeypatch.setattr(config, "DATA", tmp_path)
+
+    mcp = FastMCP("test-indexation", stateless_http=True, json_response=True)
+
+    @mcp.tool()
+    async def indexer_manuels() -> str:
+        await asyncio.sleep(0.1)
+        return "Indexation de test terminée"
+
+    async def executer():
+        serveur = uvicorn.Server(
+            uvicorn.Config(
+                mcp.streamable_http_app(),
+                host="127.0.0.1",
+                port=0,
+                log_level="critical",
+            )
+        )
+        tache = asyncio.create_task(serveur.serve())
+        try:
+            async with asyncio.timeout(5):
+                while not serveur.started:
+                    if tache.done():
+                        await tache
+                    await asyncio.sleep(0.01)
+            port = serveur.servers[0].sockets[0].getsockname()[1]
+            monkeypatch.setattr(fichiers, "MCP_URL", f"http://127.0.0.1:{port}/mcp")
+            if expiration:
+                client_mcp = fichiers.MultiServerMCPClient
+
+                def client_court(configuration):
+                    configuration["documentation"]["sse_read_timeout"] = 0.02
+                    return client_mcp(configuration)
+
+                monkeypatch.setattr(fichiers, "MultiServerMCPClient", client_court)
+                with pytest.raises(RuntimeError, match="délai d'attente") as erreur:
+                    await fichiers.indexer_manuels()
+                assert "TaskGroup" not in str(erreur.value)
+            else:
+                assert await fichiers.indexer_manuels() == "Indexation de test terminée"
+
+            def verifier_interface():
+                app = AppTest.from_file(
+                    str(Path(__file__).resolve().parents[1] / "app.py"),
+                    default_timeout=20,
+                ).run()
+                app.button(key="indexer").click().run()
+                assert not app.exception
+                if expiration:
+                    assert "délai d'attente" in app.error[0].value
+                    assert "TaskGroup" not in app.error[0].value
+                else:
+                    assert app.success[0].value == "Indexation de test terminée"
+
+            # Laisser la boucle HTTP active pendant que Streamlit utilise son propre thread.
+            await asyncio.to_thread(verifier_interface)
+        finally:
+            serveur.should_exit = True
+            await asyncio.wait_for(tache, timeout=5)
+
+    asyncio.run(executer())

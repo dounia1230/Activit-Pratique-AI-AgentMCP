@@ -2,14 +2,35 @@
 
 import hashlib
 import re
+from datetime import timedelta
 from io import BytesIO
 from pathlib import Path
 
+import httpx
 import pymupdf
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from PIL import Image
 
 from config import DATA, MCP_URL
+
+
+def message_erreur(erreur):
+    """Afficher la cause utile, y compris dans les groupes d'erreurs asynchrones."""
+    if isinstance(erreur, BaseExceptionGroup):
+        messages = dict.fromkeys(message_erreur(cause) for cause in erreur.exceptions)
+        return "\n".join(messages)
+    if isinstance(erreur, (httpx.TimeoutException, TimeoutError)):
+        return (
+            "Le délai d'attente de la connexion MCP est dépassé. L'indexation peut "
+            "continuer côté serveur : attendez sa fin avant de la relancer. "
+            "Redémarrez Streamlit pour charger le délai d'attente de 30 minutes."
+        )
+    if isinstance(erreur, httpx.ConnectError):
+        return (
+            f"Serveur MCP injoignable à {MCP_URL}. "
+            "Démarrez-le avec : uv run mcp_server.py"
+        )
+    return str(erreur) or type(erreur).__name__
 
 
 def enregistrer_fichier(nom, contenu):
@@ -69,8 +90,13 @@ async def indexer_manuels():
             }
         }
     )
-    async with client.session("documentation") as session:
-        resultat = await session.call_tool("indexer_manuels", {})
+    try:
+        async with client.session("documentation") as session:
+            resultat = await session.call_tool(
+                "indexer_manuels", {}, read_timeout_seconds=timedelta(minutes=30)
+            )
+    except Exception as erreur:
+        raise RuntimeError(message_erreur(erreur)) from erreur
     texte = "\n".join(bloc.text for bloc in resultat.content if bloc.type == "text")
     if resultat.isError:
         raise RuntimeError(texte)

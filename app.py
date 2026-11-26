@@ -5,7 +5,12 @@ import asyncio
 import streamlit as st
 
 from config import DATA, trouver_photo
-from fichiers import enregistrer_fichier, figures_reponse, indexer_manuels
+from fichiers import (
+    enregistrer_fichier,
+    figures_reponse,
+    indexer_manuels,
+    message_erreur,
+)
 from orchestrateur import construire_graphe
 
 ETAPES = {
@@ -85,10 +90,7 @@ def main():
                 try:
                     resultat = asyncio.run(indexer_manuels())
                 except Exception as erreur:
-                    st.error(f"Indexation échouée : {erreur}")
-                    st.caption(
-                        "Vérifiez Ollama et redémarrez le serveur MCP s'il vient d'être mis à jour."
-                    )
+                    st.error(f"Indexation échouée : {message_erreur(erreur)}")
                 else:
                     st.session_state.pop("import_pdf", None)
                     st.success(resultat)

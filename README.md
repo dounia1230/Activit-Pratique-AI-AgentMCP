@@ -36,6 +36,8 @@ L'indexation envoie 16 passages à la fois à Ollama et traite les figures par l
 
 Si une erreur mentionne `/tokenize` et un port local variable, le processus interne du modèle Ollama est devenu indisponible ; ne pas utiliser ce port dans `.env`. Vérifier avec `ollama list`, puis essayer `ollama stop nomic-embed-text` et relancer l'indexation. Si nécessaire, quitter et relancer l'application Ollama. Après une modification du code, redémarrer également `uv run mcp_server.py`. Les erreurs GPU et les détails sont consultables dans `%LOCALAPPDATA%\Ollama\server.log` sous Windows.
 
+Si l'interface affiche une erreur MCP, les sous-erreurs des groupes `TaskGroup` sont dépliées pour montrer la cause (connexion refusée, délai d'attente, etc.). Les délais de lecture HTTP et de réponse MCP pour l'indexation sont tous deux fixés à 30 minutes. Après une mise à jour, redémarrer aussi Streamlit avec `uv run streamlit run app.py` pour recharger les modules Python. Une déconnexion du navigateur ne garantit pas l'arrêt du calcul côté serveur : ne pas relancer plusieurs fois l'indexation. Le serveur refuse une nouvelle indexation lorsqu'une opération documentaire est déjà en cours.
+
 ## Lancer
 
 Dans un premier terminal, démarrer le serveur MCP sur `http://127.0.0.1:24000/mcp` :
@@ -97,6 +99,8 @@ uv run ruff format --check .
 ```
 
 Les tests utilisent des modèles simulés et une base Chroma temporaire. Les tests de l'interface utilisent `AppTest` de Streamlit avec un graphe simulé. Aucun modèle Ollama ni téléchargement CLIP n'est nécessaire pour les exécuter.
+
+Le bouton d'indexation est aussi testé avec un vrai serveur MCP HTTP local : succès d'un outil simulé et expiration de connexion, avec vérification du message affiché dans Streamlit.
 
 ## Références
 
