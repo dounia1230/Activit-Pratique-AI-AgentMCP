@@ -1,6 +1,7 @@
 """Étape 3 : texte avec Ollama, figures avec CLIP, stockage dans ChromaDB."""
 
 import hashlib
+from uuid import uuid4
 
 import chromadb
 import pymupdf
@@ -97,27 +98,54 @@ def main():
     textes = [doc for doc in documents if doc.metadata["type"] == "texte"]
     figures = [doc for doc in documents if doc.metadata["type"] == "figure"]
     base = base_documentaire()
-    images = base_figures()
-    # Reconstruction explicite : un manuel supprimé ne reste pas dans l'index.
-    anciens = base.get()["ids"]
-    if anciens:
-        base.delete(ids=anciens)
-    anciens = images.get()["ids"]
-    if anciens:
-        images.delete(ids=anciens)
-    if textes:
-        base.add_documents(textes, ids=[f"texte_{i}" for i in range(len(textes))])
-    if figures:
-        # Les URI chargent les pixels : CLIP encode les images, pas leur légende.
-        uris = [str(DATA / doc.metadata["image"]) for doc in figures]
-        vecteurs = embeddings_clip()(input=ImageLoader()(uris))
-        images.add(
-            ids=[f"figure_{i}" for i in range(len(figures))],
-            embeddings=vecteurs,
-            uris=uris,
-            documents=[doc.page_content for doc in figures],
-            metadatas=[doc.metadata for doc in figures],
-        )
+    anciens_textes = base.get()["ids"]
+    version = uuid4().hex
+    nouveaux_textes, nouvelles_figures = [], []
+    images = None
+    try:
+        # Un long manuel ne doit pas devenir une requête Ollama géante.
+        for debut in range(0, len(textes), 16):
+            lot = textes[debut : debut + 16]
+            ids = [f"{version}_texte_{debut + i}" for i in range(len(lot))]
+            nouveaux_textes.extend(ids)
+            base.add_documents(lot, ids=ids)
+            print(f"Texte : {debut + len(lot)}/{len(textes)}", flush=True)
+
+        # Charger CLIP après le calcul textuel limite le pic de mémoire.
+        images = base_figures()
+        anciennes_figures = images.get()["ids"]
+        for debut in range(0, len(figures), 4):
+            lot = figures[debut : debut + 4]
+            ids = [f"{version}_figure_{debut + i}" for i in range(len(lot))]
+            uris = [str(DATA / doc.metadata["image"]) for doc in lot]
+            # Charger seulement les pixels du lot, jamais toutes les figures à la fois.
+            vecteurs = embeddings_clip()(input=ImageLoader()(uris))
+            nouvelles_figures.extend(ids)
+            images.add(
+                ids=ids,
+                embeddings=vecteurs,
+                uris=uris,
+                documents=[doc.page_content for doc in lot],
+                metadatas=[doc.metadata for doc in lot],
+            )
+            print(f"Figures : {debut + len(lot)}/{len(figures)}", flush=True)
+    except Exception as erreur:
+        # Les identifiants uniques permettent de retirer uniquement l'essai raté.
+        if nouveaux_textes:
+            base.delete(ids=nouveaux_textes)
+        if images is not None and nouvelles_figures:
+            images.delete(ids=nouvelles_figures)
+        raise RuntimeError(
+            "Indexation interrompue ; les nouveaux lots ont été retirés et l'index "
+            "précédent est conservé. Vérifiez Ollama, puis réessayez. "
+            f"Détail : {erreur}"
+        ) from erreur
+
+    # Ne retirer l'ancien index qu'après le succès de tous les lots.
+    if anciens_textes:
+        base.delete(ids=anciens_textes)
+    if anciennes_figures:
+        images.delete(ids=anciennes_figures)
     print(
         f"{len(textes)} passages et {len(figures)} figures CLIP indexés dans data/chroma."
     )
@@ -127,5 +155,5 @@ def main():
 if __name__ == "__main__":
     try:
         main()
-    except ValueError as erreur:
+    except (ValueError, RuntimeError) as erreur:
         raise SystemExit(str(erreur)) from erreur

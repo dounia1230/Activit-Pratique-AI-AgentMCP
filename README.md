@@ -32,6 +32,10 @@ Si le PDF est déjà présent, lancer seulement l'ingestion, ou utiliser **Index
 
 ChromaDB conserve deux collections : texte avec les embeddings Ollama, figures avec CLIP. Une photo recherche les figures visuellement proches ; sans photo, CLIP utilise la question. La réponse s'appuie sur le texte des pages retrouvées. CLIP ne lit pas les codes d'erreur et ne produit pas de descriptions. Les dessins vectoriels et l'OCR complet des documents scannés ne sont pas pris en charge. Relancer l'ingestion après modification des manuels ou des modèles, sans requête en cours : les collections actives sont reconstruites.
 
+L'indexation envoie 16 passages à la fois à Ollama et traite les figures par lots de 4 pour limiter la mémoire utilisée. Le modèle d'embeddings utilise le CPU, un contexte de 2048 tokens et un délai réseau de 90 secondes ; le modèle de chat garde sa configuration habituelle. Un long manuel peut prendre plusieurs minutes ; l'appel d'indexation MCP accepte jusqu'à 30 minutes d'attente. L'ancien index est retiré seulement après le succès de tous les lots. Si le calcul ou l'ajout d'un lot échoue, les nouveaux lots sont supprimés et les entrées de l'ancien index restent disponibles. Cette protection concerne les erreurs gérées par le programme, pas un arrêt brutal du processus.
+
+Si une erreur mentionne `/tokenize` et un port local variable, le processus interne du modèle Ollama est devenu indisponible ; ne pas utiliser ce port dans `.env`. Vérifier avec `ollama list`, puis essayer `ollama stop nomic-embed-text` et relancer l'indexation. Si nécessaire, quitter et relancer l'application Ollama. Après une modification du code, redémarrer également `uv run mcp_server.py`. Les erreurs GPU et les détails sont consultables dans `%LOCALAPPDATA%\Ollama\server.log` sous Windows.
+
 ## Lancer
 
 Dans un premier terminal, démarrer le serveur MCP sur `http://127.0.0.1:24000/mcp` :

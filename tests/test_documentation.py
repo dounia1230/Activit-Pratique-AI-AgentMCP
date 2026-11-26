@@ -150,6 +150,73 @@ def test_ingestion_et_recherche_par_photo_utilisent_les_pixels(bases, documents_
     assert resultat["metadatas"][0][0]["source"] == manuel.name
 
 
+@pytest.mark.parametrize("echec", ["", "texte", "figure"])
+def test_lots_et_conservation_de_index_en_cas_echec(
+    bases, documents_test, monkeypatch, echec
+):
+    base, images, clip = bases
+    _, photo = documents_test
+    ancien = Document(
+        page_content="Ancien manuel",
+        metadata={"source": "ancien.pdf", "page": 1, "type": "texte"},
+    )
+    base.add_documents([ancien], ids=["ancien_texte"])
+    images.add(
+        ids=["ancienne_figure"],
+        embeddings=[[1.0, 0.0, 0.0]],
+        documents=["Ancienne figure"],
+        metadatas=[{"source": "ancien.pdf", "page": 1, "type": "figure"}],
+    )
+    documents = [
+        Document(page_content=f"Passage {i}", metadata=ancien.metadata)
+        for i in range(33)
+    ] + [
+        Document(
+            page_content=f"Figure {i}",
+            metadata={
+                **ancien.metadata,
+                "type": "figure",
+                "image": f"photos/{photo.name}",
+            },
+        )
+        for i in range(9)
+    ]
+    lots_textes, lots_figures = [], []
+
+    class EmbeddingsMesures(DeterministicFakeEmbedding):
+        def embed_documents(self, textes):
+            lots_textes.append(len(textes))
+            if echec == "texte" and len(lots_textes) == 2:
+                raise ConnectionError("Processus Ollama indisponible")
+            return super().embed_documents(textes)
+
+    def encoder_lot(input):
+        lots_figures.append(len(input))
+        if echec == "figure" and len(lots_figures) == 2:
+            raise RuntimeError("CLIP indisponible")
+        return clip(input)
+
+    monkeypatch.setattr(ingestion, "extraire_pdf", lambda pdf: documents)
+    monkeypatch.setattr(ingestion, "embeddings", lambda: EmbeddingsMesures(size=16))
+    monkeypatch.setattr(ingestion, "base_figures", lambda: images)
+    monkeypatch.setattr(ingestion, "embeddings_clip", lambda: encoder_lot)
+    if echec:
+        with pytest.raises(RuntimeError, match="précédent est conservé"):
+            ingestion.main()
+        assert base.get()["ids"] == ["ancien_texte"]
+        assert base.get()["documents"] == ["Ancien manuel"]
+        assert images.get()["ids"] == ["ancienne_figure"]
+        assert images.get()["documents"] == ["Ancienne figure"]
+    else:
+        assert ingestion.main() == {"passages": 33, "figures": 9}
+        assert len(base.get()["ids"]) == 33
+        assert "ancien_texte" not in base.get()["ids"]
+        assert images.count() == 9
+        assert "ancienne_figure" not in images.get()["ids"]
+        assert lots_textes == [16, 16, 1]
+        assert lots_figures == [4, 4, 1]
+
+
 def test_mcp_conserve_les_references_sans_llm(monkeypatch):
     async def resultat_rag(question, photo_reference):
         return {

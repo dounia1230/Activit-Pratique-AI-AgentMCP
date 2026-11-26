@@ -32,7 +32,14 @@ def modele():
 
 
 def embeddings():
-    return OllamaEmbeddings(model=EMBEDDING_MODEL, base_url=OLLAMA_URL)
+    # Le petit modèle d'embeddings reste sur CPU, sans démarrage CUDA.
+    return OllamaEmbeddings(
+        model=EMBEDDING_MODEL,
+        base_url=OLLAMA_URL,
+        num_gpu=0,
+        num_ctx=2048,
+        client_kwargs={"timeout": 90},
+    )
 
 
 @cache

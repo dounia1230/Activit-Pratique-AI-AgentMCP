@@ -61,7 +61,13 @@ def enregistrer_fichier(nom, contenu):
 async def indexer_manuels():
     # L'index reste géré par le même processus que les recherches documentaires.
     client = MultiServerMCPClient(
-        {"documentation": {"transport": "streamable_http", "url": MCP_URL}}
+        {
+            "documentation": {
+                "transport": "streamable_http",
+                "url": MCP_URL,
+                "sse_read_timeout": 1800,
+            }
+        }
     )
     async with client.session("documentation") as session:
         resultat = await session.call_tool("indexer_manuels", {})
