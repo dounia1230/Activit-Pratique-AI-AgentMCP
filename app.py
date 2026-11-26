@@ -1,8 +1,10 @@
 """Interface Streamlit locale du SAV : chaque question lance un nouveau parcours."""
 
 import asyncio
+from io import BytesIO
 
 import streamlit as st
+from PIL import Image
 
 from config import DATA, trouver_photo
 from fichiers import (
@@ -51,7 +53,14 @@ def afficher_message(message):
             # Les références fichier/page/figure sont conservées telles quelles.
             st.markdown(message["content"])
         for figure in message.get("figures", []):
-            st.image(figure["contenu"], caption=figure["legende"])
+            with Image.open(BytesIO(figure["contenu"])) as image:
+                largeur = min(image.width, 680)
+            st.image(
+                figure["contenu"],
+                caption=figure["legende"],
+                width=largeur,
+                output_format="PNG",
+            )
         if message.get("photo"):
             st.caption(f"Photo jointe : {message['photo']}")
         if message.get("parcours"):

@@ -330,6 +330,36 @@ def test_illustrations_appartiennent_aux_pages_retrouvees(bases):
     ]
 
 
+def test_figure_principale_preferee_aux_icones(bases):
+    _, images, etat, _ = bases
+    etat["version"] = "ancienne"
+    images.ajouter(
+        [
+            noeud("Icône", type="figure", image="icone.png", bbox=[0, 0, 14, 14]),
+            noeud(
+                "Petite capture",
+                type="figure",
+                image="petite.png",
+                bbox=[0, 0, 100, 80],
+            ),
+            noeud(
+                "Capture principale",
+                type="figure",
+                image="principale.png",
+                bbox=[0, 0, 300, 200],
+            ),
+        ]
+    )
+    document = Document(
+        page_content="Procédure", metadata={"source": "manuel.pdf", "page": 1}
+    )
+    assert (
+        figures_des_pages(images, [document])[0].metadata["image"] == "principale.png"
+    )
+    images.noeuds = images.noeuds[:1]
+    assert figures_des_pages(images, [document]) == []
+
+
 @pytest.mark.parametrize("echec", ["", "texte", "figure", "description"])
 def test_lots_et_version_active_preservee_en_cas_echec(
     bases, documents_test, monkeypatch, echec

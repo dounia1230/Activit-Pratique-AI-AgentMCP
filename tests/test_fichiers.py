@@ -14,9 +14,9 @@ from PIL import Image
 import fichiers
 
 
-def image_png():
+def image_png(taille=(160, 120)):
     image = BytesIO()
-    Image.new("RGB", (8, 8)).save(image, format="PNG")
+    Image.new("RGB", taille).save(image, format="PNG")
     return image.getvalue()
 
 
@@ -98,6 +98,33 @@ def test_apercu_des_pages_citees_conserve_les_dessins_vectoriels(tmp_path, monke
         )
         == []
     )
+
+
+@pytest.mark.parametrize("page_figure", [1, 2])
+@pytest.mark.parametrize("citation", ["Source : manuel.pdf, page 1", "page 1"])
+def test_icone_ou_figure_hors_reponse_remplacee_par_page_citee(
+    tmp_path, monkeypatch, page_figure, citation
+):
+    monkeypatch.setattr(fichiers, "DATA", tmp_path)
+    (tmp_path / "manuels").mkdir()
+    (tmp_path / "figures").mkdir()
+    with pymupdf.open() as pdf:
+        page = pdf.new_page(width=200, height=200)
+        page.draw_rect((40, 40, 160, 160), color=(1, 0, 0), fill=(1, 0, 0))
+        pdf.new_page(width=200, height=200)
+        pdf.save(tmp_path / "manuels" / "manuel.pdf")
+    # Même page : icône minuscule. Autre page : vraie figure, mais hors réponse.
+    taille = (14, 14) if page_figure == 1 else (360, 260)
+    (tmp_path / "figures" / "capture.png").write_bytes(image_png(taille))
+    resultat = fichiers.figures_reponse(
+        f"Enregistrer le fichier ({citation}).\n\nSources consultées :\n"
+        "- manuel.pdf, page 1\n- manuel.pdf, page 2\n"
+        f"- manuel.pdf, page {page_figure}, figure : figures/capture.png"
+    )
+    assert len(resultat) == 1
+    assert resultat[0]["legende"] == "manuel.pdf, page 1 — aperçu du manuel"
+    with Image.open(BytesIO(resultat[0]["contenu"])) as image:
+        assert image.getpixel((image.width // 2, image.height // 2)) == (255, 0, 0)
 
 
 @pytest.mark.parametrize("erreur", [False, True])

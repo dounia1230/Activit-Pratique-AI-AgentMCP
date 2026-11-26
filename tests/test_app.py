@@ -25,7 +25,7 @@ def interface(monkeypatch, tmp_path):
     Image.new("RGB", (8, 8)).save(photos / "appareil.png")
     figures = tmp_path / "figures"
     figures.mkdir()
-    Image.new("RGB", (8, 8), "blue").save(figures / "voyant.png")
+    Image.new("RGB", (160, 120), "blue").save(figures / "voyant.png")
     monkeypatch.setattr(config, "DATA", tmp_path)
     monkeypatch.setattr(fichiers, "DATA", tmp_path)
     appels = []

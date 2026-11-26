@@ -140,8 +140,31 @@ def figures_des_pages(figures, documents):
         contenu = figures.documents(
             criteres={"source": doc.metadata["source"], "page": doc.metadata["page"]}
         )
+        # Écarter les petites icônes et préférer la figure principale de la page.
+        contenu = [
+            figure
+            for figure in contenu
+            if "bbox" not in figure.metadata
+            or min(
+                figure.metadata["bbox"][2] - figure.metadata["bbox"][0],
+                figure.metadata["bbox"][3] - figure.metadata["bbox"][1],
+            )
+            >= 40
+        ]
         if contenu:
-            resultat.append(contenu[0])
+            resultat.append(
+                max(
+                    contenu,
+                    key=lambda figure: (
+                        (
+                            (figure.metadata["bbox"][2] - figure.metadata["bbox"][0])
+                            * (figure.metadata["bbox"][3] - figure.metadata["bbox"][1])
+                        )
+                        if "bbox" in figure.metadata
+                        else 0
+                    ),
+                )
+            )
         if len(resultat) == 2:
             break
     return resultat

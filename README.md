@@ -101,7 +101,7 @@ Exemples de questions :
 - « Quelle est la capacité de chargement du papier selon le tableau du manuel ? »
 - « Retrouve les figures montrant les niveaux d'encre. »
 
-Chaque question est indépendante : l'historique affiché n'est pas envoyé aux agents. Le bouton **Effacer l'historique** vide la session, sans supprimer les documents ni PostgreSQL. Les réponses conservent les références fichier/page/figure et affichent jusqu'à deux illustrations ou aperçus de pages.
+Chaque question est indépendante : l'historique affiché n'est pas envoyé aux agents. Le bouton **Effacer l'historique** vide la session, sans supprimer les documents ni PostgreSQL. Les réponses conservent les références fichier/page/figure et affichent jusqu'à deux illustrations ou aperçus de pages. Les images des pages explicitement citées dans la réponse sont prioritaires sur les autres pages consultées. Les petites icônes sont écartées ; sans figure exploitable, un aperçu de la page citée est affiché. L'affichage conserve la taille native des images, avec une largeur maximale de 680 pixels, sans agrandir les petites captures.
 
 Le terminal reste disponible à la place de Streamlit :
 

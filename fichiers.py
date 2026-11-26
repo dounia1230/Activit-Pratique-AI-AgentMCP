@@ -105,14 +105,37 @@ async def indexer_manuels():
 
 def figures_reponse(reponse):
     # Ce pied de réponse est ajouté par MCP, après la génération du texte.
-    _, separateur, references = reponse.rpartition("\n\nSources consultées :\n")
+    texte, separateur, references = reponse.rpartition("\n\nSources consultées :\n")
     if not separateur:
         return []
+    pages = list(
+        dict.fromkeys(
+            re.findall(
+                r"^- (.+), page (\d+)(?:, figure : .+)?$",
+                references,
+                flags=re.MULTILINE,
+            )
+        )
+    )
+    # Une page consultée ne constitue pas forcément une source de la réponse finale.
+    source_unique = len({source for source, _ in pages}) == 1
+    citees = [
+        (source, page)
+        for source, page in pages
+        if re.search(re.escape(source) + r"[`*\s]*,\s*page\s+" + page + r"\b", texte)
+        or (
+            source_unique
+            and re.search(r"\bpages?\s+" + page + r"\b", texte, flags=re.IGNORECASE)
+        )
+    ]
+    retenues = set(citees or pages)
     dossier = (DATA / "figures").resolve()
     figures, deja_vues = [], set()
     for source, page, reference in re.findall(
         r"^- (.+), page (\d+), figure : (.+)$", references, flags=re.MULTILINE
     ):
+        if (source, page) not in retenues:
+            continue
         chemin = (DATA / reference.strip()).resolve()
         if (
             not chemin.is_relative_to(dossier)
@@ -120,6 +143,13 @@ def figures_reponse(reponse):
             or chemin.suffix.lower() != ".png"
             or chemin in deja_vues
         ):
+            continue
+        try:
+            with Image.open(chemin) as image:
+                if min(image.size) < 80:
+                    continue
+                image.verify()
+        except (OSError, ValueError):
             continue
         deja_vues.add(chemin)
         figures.append(
@@ -136,9 +166,7 @@ def figures_reponse(reponse):
 
     # Les dessins vectoriels ne sont pas des images intégrées : montrer la page.
     dossier_manuels = (DATA / "manuels").resolve()
-    for source, page in re.findall(
-        r"^- (.+), page (\d+)$", references, flags=re.MULTILINE
-    ):
+    for source, page in citees or pages:
         chemin = (dossier_manuels / source).resolve()
         cle = (chemin, int(page))
         if (
