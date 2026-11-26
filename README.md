@@ -59,6 +59,27 @@ Pour tester la garantie sans LLM :
 uv run garantie.py PX200-0042
 ```
 
+### Interface Streamlit
+
+Pour utiliser le SAV dans le navigateur, lancer dans le second terminal à la place de `main.py` :
+
+```powershell
+uv run streamlit run app.py
+```
+
+Ouvrir [http://localhost:8501](http://localhost:8501). Ollama doit être démarré ; les questions documentaires nécessitent aussi le serveur MCP du premier terminal et l'ingestion des manuels.
+
+Dans la barre latérale :
+
+1. Choisir un **PDF ou une photo** (PNG, JPEG, WebP, 50 Mo maximum), puis cliquer sur **Importer le fichier**. Les fichiers sont vérifiés et enregistrés localement dans `data/manuels/` ou `data/photos/`, avec une empreinte dans leur nom pour éviter d'écraser un autre document.
+2. Pour un PDF, cliquer sur **Indexer les PDF** et attendre la confirmation avant de poser une question. Tous les manuels présents sont réindexés : texte avec Ollama, figures intégrées avec CLIP. Le premier chargement de CLIP peut télécharger ses poids. Les PDF protégés par mot de passe sont refusés.
+3. Une photo importée est sélectionnée automatiquement, avec aperçu, pour la prochaine question. Elle sert à rechercher les figures visuellement proches des manuels ; elle n'est pas ajoutée à l'index des manuels. Choisir « Sans photo » pour poser une question uniquement textuelle.
+4. Poser la question en précisant l'appareil. La réponse affiche le texte sourcé et jusqu'à deux figures retrouvées, lorsqu'elles existent, avec leur fichier, page et référence. Une figure similaire ne constitue pas à elle seule un diagnostic. Les PDF sans figures intégrées produisent une réponse textuelle ; l'OCR et les dessins vectoriels restent hors périmètre.
+
+**Redémarrer le serveur MCP après cette mise à jour**, pour rendre disponible l'outil `indexer_manuels`. L'interface déclenche l'indexation via MCP, sans demander au modèle de la lancer. Le serveur attend la fin d'une recherche avant de reconstruire l'index et attend la fin de cette reconstruction avant de lancer une nouvelle recherche. Ne pas lancer simultanément l'ingestion en ligne de commande ni plusieurs serveurs MCP sur la même base.
+
+L'historique conserve les questions, réponses, figures et parcours des agents. Chaque question est indépendante : l'historique affiché n'est pas envoyé aux agents. Il reste en mémoire dans la session du navigateur ; le bouton « Effacer l'historique » le vide, sans supprimer les documents ni l'index. Les fichiers importés restent locaux et sont exclus de Git.
+
 ## Tests
 
 ```powershell
@@ -67,7 +88,7 @@ uv run ruff check .
 uv run ruff format --check .
 ```
 
-Les tests utilisent des modèles simulés et une base Chroma temporaire. Aucun modèle Ollama ni téléchargement CLIP n'est nécessaire pour les exécuter.
+Les tests utilisent des modèles simulés et une base Chroma temporaire. Les tests de l'interface utilisent `AppTest` de Streamlit avec un graphe simulé. Aucun modèle Ollama ni téléchargement CLIP n'est nécessaire pour les exécuter.
 
 ## Références
 

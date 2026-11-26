@@ -1,7 +1,10 @@
 """Étape 4 : publication de l'outil RAG en Streamable HTTP."""
 
+import asyncio
+
 from mcp.server.fastmcp import FastMCP
 
+from ingestion import main as reconstruire_index
 from rag import repondre_documentation
 
 mcp = FastMCP(
@@ -11,6 +14,18 @@ mcp = FastMCP(
     stateless_http=True,
     json_response=True,
 )
+verrou_index = asyncio.Lock()
+
+
+@mcp.tool()
+async def indexer_manuels() -> str:
+    """Reconstruire l'index des PDF de data/manuels, à la demande de l'utilisateur."""
+    async with verrou_index:
+        resultat = await asyncio.to_thread(reconstruire_index)
+    return (
+        f"Indexation terminée : {resultat['passages']} passages et "
+        f"{resultat['figures']} figures. Vous pouvez poser votre question."
+    )
 
 
 @mcp.tool()
@@ -20,7 +35,8 @@ async def rag_multimodal(question: str, photo_reference: str = "") -> str:
     Transmettre la question complète et la référence exacte de la photo si elle est fournie.
     Renvoie une réponse en français accompagnée des sources (manuel, page, figure).
     """
-    resultat = await repondre_documentation(question, photo_reference)
+    async with verrou_index:
+        resultat = await repondre_documentation(question, photo_reference)
     references = []
     for source in resultat["sources"]:
         reference = f"- {source['source']}, page {source['page']}"

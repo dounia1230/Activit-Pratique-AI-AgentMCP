@@ -1,16 +1,34 @@
 import asyncio
+import threading
 
 import numpy as np
+import pymupdf
 import pytest
 from chromadb.api.types import EmbeddingFunction
 from langchain_core.documents import Document
 from langchain_core.embeddings import DeterministicFakeEmbedding
 from langchain_core.messages import AIMessage, ToolMessage
+from PIL import Image
 
 import ingestion
 import mcp_server
 import rag
-from examples import creer_demo
+
+
+@pytest.fixture
+def documents_test(tmp_path):
+    # Données minimales créées uniquement dans le dossier temporaire des tests.
+    (tmp_path / "manuels").mkdir()
+    (tmp_path / "photos").mkdir()
+    photo = tmp_path / "photos" / "photo_test.png"
+    Image.new("RGB", (32, 32), "red").save(photo)
+    manuel = tmp_path / "manuels" / "manuel_test.pdf"
+    with pymupdf.open() as pdf:
+        page = pdf.new_page()
+        page.insert_text((40, 40), "Le bac a papier est vide. Ajouter du papier.")
+        page.insert_image(pymupdf.Rect(40, 80, 140, 180), filename=str(photo))
+        pdf.save(manuel)
+    return manuel, photo
 
 
 @pytest.fixture
@@ -47,11 +65,10 @@ def bases(tmp_path, monkeypatch):
     return texte, images, clip
 
 
-def test_extraction_texte_et_figure(tmp_path, monkeypatch):
-    monkeypatch.setattr(creer_demo, "DATA", tmp_path)
-    creer_demo.main()
+def test_extraction_texte_et_figure(tmp_path, monkeypatch, documents_test):
     monkeypatch.setattr(ingestion, "DATA", tmp_path)
-    documents = ingestion.extraire_pdf(tmp_path / "manuels" / "manuel_demo_px200.pdf")
+    manuel, _ = documents_test
+    documents = ingestion.extraire_pdf(manuel)
     assert {d.metadata["type"] for d in documents} == {"texte", "figure"}
     assert all(d.metadata["page"] == 1 for d in documents)
     assert any(
@@ -115,12 +132,9 @@ def test_base_vide_ne_genere_pas_de_reponse(bases):
     assert "vide" in resultat["reponse"]
 
 
-def test_ingestion_et_recherche_par_photo_utilisent_les_pixels(
-    bases, tmp_path, monkeypatch
-):
+def test_ingestion_et_recherche_par_photo_utilisent_les_pixels(bases, documents_test):
     textes, images, clip = bases
-    monkeypatch.setattr(creer_demo, "DATA", tmp_path)
-    creer_demo.main()
+    manuel, photo = documents_test
     ingestion.main()
     assert textes.get()["ids"]
     assert images.count() == 1
@@ -128,12 +142,12 @@ def test_ingestion_et_recherche_par_photo_utilisent_les_pixels(
         clip.images_encodees == 1
     )  # La légende ne doit pas remplacer l'image à indexer.
     resultat = images.query(
-        query_uris=[str(tmp_path / "photos" / "img_px200_01.png")],
+        query_uris=[str(photo)],
         n_results=1,
         include=["metadatas"],
     )
     assert clip.images_encodees == 2
-    assert resultat["metadatas"][0][0]["source"] == "manuel_demo_px200.pdf"
+    assert resultat["metadatas"][0][0]["source"] == manuel.name
 
 
 def test_mcp_conserve_les_references_sans_llm(monkeypatch):
@@ -154,3 +168,44 @@ def test_mcp_conserve_les_references_sans_llm(monkeypatch):
     texte = asyncio.run(mcp_server.rag_multimodal("E02 ?"))
     assert texte.startswith("Ajouter du papier.")
     assert "manuel.pdf, page 4, figure : figures/voyant.png" in texte
+
+
+def test_mcp_attend_la_fin_de_indexation_avant_recherche(monkeypatch):
+    terminer = threading.Event()
+    appels = []
+
+    async def executer():
+        debut = asyncio.Event()
+        boucle = asyncio.get_running_loop()
+
+        def reconstruire():
+            appels.append("indexation")
+            boucle.call_soon_threadsafe(debut.set)
+            if not terminer.wait(timeout=5):
+                raise RuntimeError("Le test n'a pas libéré l'indexation")
+            appels.append("fin indexation")
+            return {"passages": 3, "figures": 1}
+
+        async def rechercher(question, photo_reference):
+            appels.append("recherche")
+            return {"reponse": "Prêt", "sources": []}
+
+        monkeypatch.setattr(mcp_server, "verrou_index", asyncio.Lock())
+        monkeypatch.setattr(mcp_server, "reconstruire_index", reconstruire)
+        monkeypatch.setattr(mcp_server, "repondre_documentation", rechercher)
+        indexation = asyncio.create_task(mcp_server.indexer_manuels())
+        try:
+            await asyncio.wait_for(debut.wait(), timeout=5)
+            recherche = asyncio.create_task(mcp_server.rag_multimodal("Question"))
+            await asyncio.sleep(
+                0
+            )  # Donner à la recherche l'occasion de prendre le verrou.
+            assert appels == ["indexation"]
+            terminer.set()
+            assert "3 passages et 1 figures" in await indexation
+            assert await recherche == "Prêt"
+        finally:
+            terminer.set()
+
+    asyncio.run(executer())
+    assert appels == ["indexation", "fin indexation", "recherche"]

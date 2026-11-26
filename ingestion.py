@@ -84,15 +84,15 @@ def extraire_pdf(pdf):
 def main():
     pdfs = sorted((DATA / "manuels").glob("*.pdf"))
     if not pdfs:
-        raise SystemExit(
-            "Ajoute un manuel PDF dans data/manuels, ou lance examples/creer_demo.py."
+        raise ValueError(
+            "Ajoute un manuel PDF dans data/manuels, ou importe-le depuis Streamlit."
         )
     documents = []
     for pdf in pdfs:
         print(f"Extraction : {pdf.name}", flush=True)
         documents.extend(extraire_pdf(pdf))
     if not documents:
-        raise SystemExit("Aucun texte ni figure extrait : vérifier les PDF.")
+        raise ValueError("Aucun texte ni figure extrait : vérifier les PDF.")
 
     textes = [doc for doc in documents if doc.metadata["type"] == "texte"]
     figures = [doc for doc in documents if doc.metadata["type"] == "figure"]
@@ -121,7 +121,11 @@ def main():
     print(
         f"{len(textes)} passages et {len(figures)} figures CLIP indexés dans data/chroma."
     )
+    return {"passages": len(textes), "figures": len(figures)}
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except ValueError as erreur:
+        raise SystemExit(str(erreur)) from erreur
